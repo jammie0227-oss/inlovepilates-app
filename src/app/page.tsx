@@ -50,10 +50,7 @@ export default function Home() {
   const [tab1View, setTab1View] = useState<'day' | 'week'>('day');
   const [tab2View, setTab2View] = useState<'day' | 'week' | 'month'>('day');
 
-  const [priorityGrid, setPriorityGrid] = useState<Record<string, { large?: string; small?: string }>>({
-    '一-8': { large: 't-1', small: 't-daisy' }, '一-9': { large: 't-1' }, '二-14': { large: 't-1', small: 't-2' },
-    '三-18': { small: 't-2' }, '五-9': { large: 't-3', small: 't-1' }, '五-14': { small: 't-1' }
-  });
+  const [priorityGrid, setPriorityGrid] = useState<Record<string, { large?: string; small?: string }>>({});
 
   const [teachers, setTeachers] = useState<Record<string, TeacherProfile>>(INITIAL_TEACHERS);
   const [students, setStudents] = useState<StudentItem[]>(INITIAL_STUDENTS);
@@ -526,20 +523,21 @@ export default function Home() {
         )}
 
         {/* 頂部 Header */}
-        <header className="bg-white border-b border-slate-200 px-3 sm:px-4 py-2 flex justify-between items-center shrink-0 shadow-2xs z-20 h-12">
+        <header className="bg-white border-b border-slate-200 px-3 sm:px-4 py-2 flex flex-col justify-center shrink-0 shadow-2xs z-20 min-h-[48px]">
           
           {/* Tab 1 Header */}
           {activeTab === 1 && (
-            <div className="flex items-center justify-between w-full">
-              <div className="flex items-center gap-2">
-                <div className="flex bg-slate-100 p-0.5 rounded-xl text-[11px] font-bold text-slate-600">
+            <div className="flex items-center justify-between w-full gap-2">
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="flex bg-slate-100 p-0.5 rounded-xl text-[11px] font-bold text-slate-600 shrink-0">
                   <button onClick={() => setTab1View('day')} className={`px-2.5 py-1 rounded-lg transition ${tab1View === 'day' ? 'bg-white text-rose-600 font-black shadow-2xs' : ''}`}>日</button>
                   <button onClick={() => setTab1View('week')} className={`px-2.5 py-1 rounded-lg transition ${tab1View === 'week' ? 'bg-white text-rose-600 font-black shadow-2xs' : ''}`}>週</button>
                 </div>
-                <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 max-w-[190px] sm:max-w-xs">
+                {/* 解除 max-w 寬度限制，改用 flex-wrap 讓老師名單自動安全換行 */}
+                <div className="flex items-center gap-x-2.5 gap-y-1 flex-wrap flex-1 pl-1">
                   {activeTeachersList.map(t => (
-                    <span key={t.id} className="flex items-center gap-1 text-[10px] font-bold text-slate-600 shrink-0">
-                      <span className={`w-2 h-2 rounded-full ${t.color}`} />
+                    <span key={t.id} className="flex items-center gap-1 text-[10px] font-bold text-slate-600 whitespace-nowrap">
+                      <span className={`w-2 h-2 rounded-full ${t.color} shrink-0`} />
                       <span>{t.name}</span>
                     </span>
                   ))}
@@ -557,14 +555,14 @@ export default function Home() {
 
           {/* Tab 2 Header */}
           {activeTab === 2 && (
-            <div className="flex items-center justify-between w-full">
-              <div className="flex items-center gap-2">
-                <div className="flex bg-slate-100 p-0.5 rounded-xl text-[11px] font-bold text-slate-600">
+            <div className="flex items-center justify-between w-full gap-2">
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="flex bg-slate-100 p-0.5 rounded-xl text-[11px] font-bold text-slate-600 shrink-0">
                   <button onClick={() => setTab2View('day')} className={`px-2 py-1 rounded-lg transition ${tab2View === 'day' ? 'bg-white text-rose-600 font-black shadow-2xs' : ''}`}>日</button>
                   <button onClick={() => setTab2View('week')} className={`px-2 py-1 rounded-lg transition ${tab2View === 'week' ? 'bg-white text-rose-600 font-black shadow-2xs' : ''}`}>週</button>
                   <button onClick={() => setTab2View('month')} className={`px-2 py-1 rounded-lg transition ${tab2View === 'month' ? 'bg-white text-rose-600 font-black shadow-2xs' : ''}`}>月</button>
                 </div>
-                <div className="flex items-center gap-2 text-[10px] font-bold text-slate-600">
+                <div className="flex items-center gap-2 text-[10px] font-bold text-slate-600 flex-wrap">
                   <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500" /> 大</span>
                   <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" /> 小</span>
                 </div>

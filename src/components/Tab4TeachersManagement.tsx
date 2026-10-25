@@ -317,12 +317,12 @@ export default function Tab4TeachersManagement({
                       <span className={`font-black ${t.text} text-sm`}>{t.name}</span>
                       {isDaisy && (
                         <span className="text-[9px] bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-md font-bold">
-                          最高管理者
+                          管理者
                         </span>
                       )}
                     </div>
 
-                    {/* Daisy (最高管理者) 不顯示封存鈕 */}
+                    {/* Daisy (管理者) 不顯示封存鈕 */}
                     {!isDaisy && (
                       <button
                         onClick={(e) => { 
@@ -339,30 +339,49 @@ export default function Tab4TeachersManagement({
 
                   {/* 代表色挑選器 (被使用的顏色自動鎖定禁用) */}
                   {colorPickerTarget === t.id && (
-                    <div className="absolute top-full left-0 mt-1 p-2.5 bg-white rounded-2xl shadow-xl border border-slate-100 z-20 grid grid-cols-6 gap-2" onClick={e => e.stopPropagation()}>
-                      {PRESET_COLORS.map(c => {
-                        const isColorInUse = usedColorsSet.has(c.color) && t.color !== c.color;
-                        return (
-                          <button
-                            key={c.color}
-                            disabled={isColorInUse}
-                            onClick={() => {
-                              setTeachers((prev: any) => ({
-                                ...prev,
-                                [t.id]: { ...prev[t.id], color: c.color, bgLight: c.bgLight, border: c.border, text: c.text }
-                              }));
-                              setColorPickerTarget(null);
-                              showToast(`已更新 ${t.name} 老師之代表色`);
-                            }}
-                            className={`w-6 h-6 rounded-full ${c.color} border border-slate-200 flex items-center justify-center transition relative ${
-                              isColorInUse ? 'opacity-30 cursor-not-allowed grayscale-[40%]' : 'hover:scale-110'
-                            }`}
-                            title={isColorInUse ? '該色已被其他老師使用' : c.label}
-                          >
-                            {isColorInUse && <Lock className="w-2.5 h-2.5 text-slate-700" />}
-                          </button>
-                        );
-                      })}
+                    <div 
+                      className="absolute top-full left-0 mt-1 p-2.5 bg-white rounded-2xl shadow-xl border border-slate-100 z-20" 
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {t.id === 't-daisy' ? (
+                        <div className="text-xs font-bold text-amber-700 bg-amber-50 px-3 py-2 rounded-xl whitespace-nowrap">
+                          ⭐ 管理者固定為黃色，不可更換
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-5 gap-2">
+                          {PRESET_COLORS.map(c => {
+                            const isColorInUse = usedColorsSet.has(c.color) && t.color !== c.color;
+                            return (
+                              <button
+                        key={c.color}
+                        type="button"
+                        disabled={isColorInUse}
+                        onClick={() => {
+                          setTeachers((prev: any) => ({
+                            ...prev,
+                            [t.id]: { ...prev[t.id], color: c.color, bgLight: c.bgLight, border: c.border, text: c.text }
+                          }));
+                          setColorPickerTarget(null);
+                          showToast(`已更新 ${t.name} 之代表色為 ${c.name}`);
+                        }}
+                        className={`w-6 h-6 rounded-full ${c.color} border border-slate-200/80 flex items-center justify-center transition relative ${
+                          isColorInUse 
+                            ? 'cursor-not-allowed ring-1 ring-slate-300' 
+                            : 'hover:scale-110 active:scale-95 shadow-2xs'
+                        }`}
+                        title={isColorInUse ? '該色已被其他老師使用' : c.label}
+                      >
+                        {/* 被使用時保持原色，只在中央加鎖頭標示 */}
+                        {isColorInUse && (
+                          <div className="absolute inset-0 bg-black/25 rounded-full flex items-center justify-center">
+                            <Lock className="w-2.5 h-2.5 text-white drop-shadow-sm" />
+                          </div>
+                        )}
+                      </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -445,31 +464,38 @@ export default function Tab4TeachersManagement({
                 />
               </div>
 
-              <div>
+<div>
                 <div className="flex justify-between items-center mb-1.5">
                   <label className="font-bold text-slate-600">選擇代表色</label>
                   <span className="text-[10px] text-slate-400">鎖定標示代表已被使用</span>
                 </div>
-                <div className="grid grid-cols-6 gap-2 p-2.5 bg-slate-50 rounded-2xl border border-slate-200">
+                <div className="grid grid-cols-5 gap-2.5 p-2.5 bg-slate-50 rounded-2xl border border-slate-200">
                   {PRESET_COLORS.map((c, idx) => {
                     const isColorInUse = usedColorsSet.has(c.color);
+                    const isSelected = newTeacherColorIndex === idx;
+
                     return (
                       <button
                         key={c.color}
                         type="button"
                         disabled={isColorInUse}
                         onClick={() => setNewTeacherColorIndex(idx)}
-                        className={`w-7 h-7 rounded-full ${c.color} flex items-center justify-center text-white transition ${
+                        className={`w-7 h-7 rounded-full ${c.color} flex items-center justify-center text-white transition relative ${
                           isColorInUse 
-                            ? 'opacity-30 cursor-not-allowed grayscale-[40%]' 
-                            : 'hover:scale-105'
-                        } ${newTeacherColorIndex === idx ? 'ring-2 ring-slate-800 scale-105 shadow-sm' : ''}`}
-                        title={isColorInUse ? '已被其他老師使用' : c.label}
+                            ? 'cursor-not-allowed ring-1 ring-slate-300' 
+                            : isSelected 
+                              ? 'ring-2 ring-slate-800 scale-105 shadow-sm' 
+                              : 'hover:scale-105 active:scale-95 shadow-2xs'
+                        }`}
+                        title={isColorInUse ? `${c.name}（已被其他老師使用）` : c.label}
                       >
+                        {/* 被佔用時：保持 100% 飽和原色，中央覆蓋微透黑底與白色鎖頭 */}
                         {isColorInUse ? (
-                          <Lock className="w-3 h-3 text-slate-700" />
-                        ) : newTeacherColorIndex === idx ? (
-                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          <div className="absolute inset-0 bg-black/25 rounded-full flex items-center justify-center">
+                            <Lock className="w-3 h-3 text-white drop-shadow-sm" />
+                          </div>
+                        ) : isSelected ? (
+                          <Check className="w-3.5 h-3.5 stroke-[3] text-white drop-shadow-sm" />
                         ) : null}
                       </button>
                     );

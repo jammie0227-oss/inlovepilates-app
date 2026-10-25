@@ -360,7 +360,7 @@ export class ScheduleEngine {
 
     const copyList = newRecords.map(b => {
       const roomDot = b.roomType === 'large' ? '🟣' : '🟢';
-      return `• ${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)} ${roomDot} (${b.lessonType})`;
+      return `${roomDot} ${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)} (${b.lessonType})`;
     }).join('\n');
 
     const copyText = `【${sName} 預排課表】\n` + copyList + `\n共排定 ${newRecords.length} 堂課。`;
@@ -378,19 +378,23 @@ export class ScheduleEngine {
 // ==========================================
 // 4. 老師代表色常數 (Preset Colors)
 // ==========================================
+// 高對比彩虹色票庫（含粉紅、咖啡色，嚴格避開警示紅與管理者黃）
 export const PRESET_COLORS: PresetColor[] = [
-  { id: 'rose', name: '玫瑰粉', label: '玫瑰粉', color: 'bg-rose-500', bgLight: 'bg-rose-100', text: 'text-rose-900', border: 'border-rose-400' },
-  { id: 'sky', name: '天藍', label: '天藍', color: 'bg-sky-500', bgLight: 'bg-sky-100', text: 'text-sky-900', border: 'border-sky-400' },
-  { id: 'emerald', name: '翡翠綠', label: '翡翠綠', color: 'bg-emerald-500', bgLight: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-400' },
-  { id: 'purple', name: '薰衣紫', label: '薰衣紫', color: 'bg-purple-500', bgLight: 'bg-purple-100', text: 'text-purple-900', border: 'border-purple-400' },
-  { id: 'amber', name: '琥珀橘', label: '琥珀橘', color: 'bg-amber-500', bgLight: 'bg-amber-100', text: 'text-amber-900', border: 'border-amber-400' },
-  { id: 'indigo', name: '青靛藍', label: '青靛藍', color: 'bg-indigo-500', bgLight: 'bg-indigo-100', text: 'text-indigo-900', border: 'border-indigo-400' },
-  { id: 'teal', name: '松石綠', label: '松石綠', color: 'bg-teal-500', bgLight: 'bg-teal-100', text: 'text-teal-900', border: 'border-teal-400' },
-  { id: 'pink', name: '胭脂粉', label: '胭脂粉', color: 'bg-pink-500', bgLight: 'bg-pink-100', text: 'text-pink-900', border: 'border-pink-400' },
-  { id: 'cyan', name: '青空藍', label: '青空藍', color: 'bg-cyan-500', bgLight: 'bg-cyan-100', text: 'text-cyan-900', border: 'border-cyan-400' },
-  { id: 'orange', name: '陽光橘', label: '陽光橘', color: 'bg-orange-500', bgLight: 'bg-orange-100', text: 'text-orange-900', border: 'border-orange-400' }
+  // 1. 深粉紅（優雅玫瑰深粉，避開正紅警示）
+  { id: 'deep-pink', name: '深粉紅', label: '深粉紅', color: 'bg-pink-600',   bgLight: 'bg-pink-100',   text: 'text-pink-950',   border: 'border-pink-400' },
+  // 2. 黃綠色（鮮活萊姆嫩黃綠，清爽明亮）
+  { id: 'lime',      name: '黃綠色', label: '黃綠色', color: 'bg-lime-500',   bgLight: 'bg-lime-100',   text: 'text-lime-950',   border: 'border-lime-400' },
+  // 3. 翡翠綠（Tanya 經典深翠綠）
+  { id: 'emerald',   name: '翡翠綠', label: '翡翠綠', color: 'bg-emerald-500', bgLight: 'bg-emerald-100', text: 'text-emerald-950', border: 'border-emerald-400' },
+  // 4. 晴空藍（Abby 經典活力天藍）
+  { id: 'sky',       name: '晴空藍', label: '晴空藍', color: 'bg-sky-500',     bgLight: 'bg-sky-100',     text: 'text-sky-950',     border: 'border-sky-400' },
+  // 5. 薰衣紫（Cindy 經典純淨薰衣草紫）
+  { id: 'purple',    name: '薰衣紫', label: '薰衣紫', color: 'bg-purple-500',  bgLight: 'bg-purple-100',  text: 'text-purple-950',  border: 'border-purple-400' },
+  // 6. 深藍色（沉穩大氣的皇家深海藍）
+  { id: 'dark-blue', name: '深藍色', label: '深藍色', color: 'bg-blue-700',   bgLight: 'bg-blue-100',    text: 'text-blue-950',    border: 'border-blue-500' },
+  // 7. 咖啡色（深焙咖啡深棕，底色採用溫潤淺石色）
+  { id: 'coffee',    name: '咖啡色', label: '咖啡色', color: 'bg-amber-900',  bgLight: 'bg-stone-200',   text: 'text-amber-950',   border: 'border-amber-700' },
 ];
-
 // ==========================================
 // 5. 初始資料庫 (Initial Mock Data)
 // ==========================================
@@ -400,9 +404,10 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     id: 't-daisy',
     name: 'Daisy',
     phone: '0912-000-001',
-    color: 'bg-rose-500',
-    bgLight: 'bg-rose-100',
-    text: 'text-rose-900',
+    color: 'bg-amber-500',
+    bgLight: 'bg-amber-100',
+    border: 'border-amber-400',
+    text: 'text-amber-900',
     isActive: true,
     monthlyQuota: 3
   },
@@ -412,6 +417,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     phone: '0912-345-678',
     color: 'bg-sky-500',
     bgLight: 'bg-sky-100',
+    border: 'border-sky-400',
     text: 'text-sky-900',
     isActive: true,
     monthlyQuota: 3
@@ -422,6 +428,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     phone: '0922-111-222',
     color: 'bg-emerald-500',
     bgLight: 'bg-emerald-100',
+    border: 'border-emerald-400',
     text: 'text-emerald-900',
     isActive: true,
     monthlyQuota: 3
@@ -432,6 +439,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     phone: '0933-444-555',
     color: 'bg-purple-500',
     bgLight: 'bg-purple-100',
+    border: 'border-purple-400',
     text: 'text-purple-900',
     isActive: true,
     monthlyQuota: 3

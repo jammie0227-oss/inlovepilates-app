@@ -737,10 +737,10 @@ export function StudentDetailView({
   const [isQuickBookModalOpen, setIsQuickBookModalOpen] = useState(false);
   const initialPreset = getStudentBookingPreset(student, userRole);
   const [quickBookForm, setQuickBookForm] = useState({
+    roomType: initialPreset.roomType,
     date: '2026-10-24',
     hour: '14',
     minute: '00',
-    roomType: initialPreset.roomType,
     lessonType: initialPreset.lessonType
   });
 
@@ -807,13 +807,13 @@ export function StudentDetailView({
     const originalType = editingBooking.lessonType || '1v1';
 
     return (
+      editRoom === originalRoom &&
       editDate === originalDate &&
       parseInt(editHour, 10) === originalH &&
       editMin === originalM &&
-      editRoom === originalRoom &&
       editLessonType === originalType
     );
-  }, [editingBooking, editDate, editHour, editMin, editRoom, editLessonType]);
+  }, [editingBooking, editRoom, editDate, editHour, editMin, editLessonType]);
 
   const handleOpenRuleModal = () => {
     const preset = getStudentBookingPreset(student, userRole);
