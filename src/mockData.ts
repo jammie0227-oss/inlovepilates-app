@@ -6,9 +6,11 @@ export interface TeacherProfile {
   id: string;
   name: string;
   phone: string;
+  email?: string;
   color: string;
   bgLight: string;
   text: string;
+  border?: string;
   isActive: boolean;
   notes?: string;
   monthlyQuota?: number;
@@ -370,16 +372,16 @@ export class ScheduleEngine {
 // ==========================================
 
 export const PRESET_COLORS = [
-  { id: 'rose', name: '玫瑰粉', color: 'bg-rose-500', bgLight: 'bg-rose-100', text: 'text-rose-900' },
-  { id: 'sky', name: '天藍', color: 'bg-sky-500', bgLight: 'bg-sky-100', text: 'text-sky-900' },
-  { id: 'emerald', name: '翡翠綠', color: 'bg-emerald-500', bgLight: 'bg-emerald-100', text: 'text-emerald-900' },
-  { id: 'purple', name: '薰衣紫', color: 'bg-purple-500', bgLight: 'bg-purple-100', text: 'text-purple-900' },
-  { id: 'amber', name: '琥珀橘', color: 'bg-amber-500', bgLight: 'bg-amber-100', text: 'text-amber-900' },
-  { id: 'indigo', name: '青靛藍', color: 'bg-indigo-500', bgLight: 'bg-indigo-100', text: 'text-indigo-900' },
-  { id: 'teal', name: '松石綠', color: 'bg-teal-500', bgLight: 'bg-teal-100', text: 'text-teal-900' },
-  { id: 'pink', name: '胭脂粉', color: 'bg-pink-500', bgLight: 'bg-pink-100', text: 'text-pink-900' },
-  { id: 'cyan', name: '青空藍', color: 'bg-cyan-500', bgLight: 'bg-cyan-100', text: 'text-cyan-900' },
-  { id: 'orange', name: '陽光橘', color: 'bg-orange-500', bgLight: 'bg-orange-100', text: 'text-orange-900' }
+  { id: 'rose', name: '玫瑰粉', label: '玫瑰粉', color: 'bg-rose-500', bgLight: 'bg-rose-100', text: 'text-rose-900', border: 'border-rose-400' },
+  { id: 'sky', name: '天藍', label: '天藍', color: 'bg-sky-500', bgLight: 'bg-sky-100', text: 'text-sky-900', border: 'border-sky-400' },
+  { id: 'emerald', name: '翡翠綠', label: '翡翠綠', color: 'bg-emerald-500', bgLight: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-400' },
+  { id: 'purple', name: '薰衣紫', label: '薰衣紫', color: 'bg-purple-500', bgLight: 'bg-purple-100', text: 'text-purple-900', border: 'border-purple-400' },
+  { id: 'amber', name: '琥珀橘', label: '琥珀橘', color: 'bg-amber-500', bgLight: 'bg-amber-100', text: 'text-amber-900', border: 'border-amber-400' },
+  { id: 'indigo', name: '青靛藍', label: '青靛藍', color: 'bg-indigo-500', bgLight: 'bg-indigo-100', text: 'text-indigo-900', border: 'border-indigo-400' },
+  { id: 'teal', name: '松石綠', label: '松石綠', color: 'bg-teal-500', bgLight: 'bg-teal-100', text: 'text-teal-900', border: 'border-teal-400' },
+  { id: 'pink', name: '胭脂粉', label: '胭脂粉', color: 'bg-pink-500', bgLight: 'bg-pink-100', text: 'text-pink-900', border: 'border-pink-400' },
+  { id: 'cyan', name: '青空藍', label: '青空藍', color: 'bg-cyan-500', bgLight: 'bg-cyan-100', text: 'text-cyan-900', border: 'border-cyan-400' },
+  { id: 'orange', name: '陽光橘', label: '陽光橘', color: 'bg-orange-500', bgLight: 'bg-orange-100', text: 'text-orange-900', border: 'border-orange-400' }
 ];
 
 // ==========================================

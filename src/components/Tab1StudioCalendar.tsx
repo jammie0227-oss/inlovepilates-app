@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Lock, X, AlertTriangle } from 'lucide-react';
-import { TeacherProfile, BookingItem, StudentItem } from '../types';
+import { TeacherProfile, BookingItem, StudentItem } from '../mockData';
 import { formatTimeStr, formatDateWithDay, checkGlobalConflict } from '../mockData';
 
 // 判斷學員預約預設類別與教室 (規則含 1v2 優先 1v2；管理員一律優先大教室)

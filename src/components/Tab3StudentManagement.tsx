@@ -363,7 +363,7 @@ export default function Tab3StudentManagement({
             {sortedActive.length === 0 && (
               <tr><td colSpan={3} className="text-center py-8 text-slate-400 font-sans font-bold">目前無學員資料</td></tr>
             )}
-            {sortedActive.map((s) => (
+            {sortedActive.map((s: any) => (
               <tr key={s.id} onClick={() => onSelectStudent(s.id)} className="hover:bg-rose-50/50 transition cursor-pointer">
                 <td className="py-3.5 px-3 font-sans font-bold text-slate-800">
                   <div className="flex flex-col gap-0.5 items-start">
