@@ -183,7 +183,7 @@ export default function Tab3StudentManagement({
   const myStudents = useMemo(() => students.filter((s: any) => s.teacherId === currentUserId), [students, currentUserId]);
 
   const sortedActive = useMemo(() => {
-    const list = [...myStudents.filter(s => s.status === 'active')];
+    const list = [...myStudents.filter((s: any) => s.status === 'active')];
     list.sort((a, b) => {
       let valA = sortField === 'name' ? a.name : (a.nextLesson || '9999-12-31');
       let valB = sortField === 'name' ? b.name : (b.nextLesson || '9999-12-31');

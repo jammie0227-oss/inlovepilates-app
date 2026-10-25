@@ -6,16 +6,24 @@ export interface TeacherProfile {
   id: string;
   name: string;
   phone: string;
-  email?: string;
+  email?: string;       // 支援可選 email
   color: string;
   bgLight: string;
+  border?: string;      // 支援可選 border
   text: string;
-  border?: string;
   isActive: boolean;
   notes?: string;
   monthlyQuota?: number;
 }
-
+export interface PresetColor {
+  id: string;
+  name: string;
+  label: string;
+  color: string;
+  bgLight: string;
+  text: string;
+  border: string;
+}
 export interface StudentRule {
   id: string;
   freq: '每週' | '隔週' | '不固定' | 'W' | 'EOW';
@@ -370,8 +378,7 @@ export class ScheduleEngine {
 // ==========================================
 // 4. 老師代表色常數 (Preset Colors)
 // ==========================================
-
-export const PRESET_COLORS = [
+export const PRESET_COLORS: PresetColor[] = [
   { id: 'rose', name: '玫瑰粉', label: '玫瑰粉', color: 'bg-rose-500', bgLight: 'bg-rose-100', text: 'text-rose-900', border: 'border-rose-400' },
   { id: 'sky', name: '天藍', label: '天藍', color: 'bg-sky-500', bgLight: 'bg-sky-100', text: 'text-sky-900', border: 'border-sky-400' },
   { id: 'emerald', name: '翡翠綠', label: '翡翠綠', color: 'bg-emerald-500', bgLight: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-400' },
@@ -766,3 +773,4 @@ export const INITIAL_LOGS: AuditLogItem[] = [
     teacherId: 't-1'
   }
 ];
+

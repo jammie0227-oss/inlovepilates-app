@@ -2,12 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   typescript: {
-    // 構建時不因型別檢查中斷部署
+    // 忽略 TypeScript 警告，確保 Vercel 能順利完成 build
     ignoreBuildErrors: true,
-  },
-  eslint: {
-    // 構建時不因 ESLint 警告中斷部署
-    ignoreDuringBuilds: true,
   },
 };
 
