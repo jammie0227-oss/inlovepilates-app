@@ -1,8 +1,8 @@
 'use client';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Lock, X, AlertTriangle } from 'lucide-react';
-import { TeacherProfile, BookingItem, StudentItem } from '../mockData';
 import { formatTimeStr, formatDateWithDay, checkGlobalConflict } from '../mockData';
+import { TeacherProfile, BookingItem, StudentItem, ReviewItem } from '../mockData'; // 確認引入 ReviewItem[cite: 1]
 
 // 判斷學員預約預設類別與教室 (規則含 1v2 優先 1v2；管理員一律優先大教室)
 const getStudentBookingPreset = (student: StudentItem | undefined, userRole: 'admin' | 'teacher') => {
@@ -29,25 +29,31 @@ const getStudentBookingPreset = (student: StudentItem | undefined, userRole: 'ad
   return { lessonType, roomType };
 };
 
-export default function Tab1StudioCalendar({ 
+
+
+export default function Tab1StudioCalendar({
+  systemBaseDate, 
   userRole, 
   currentUserId, 
   teachers, 
   students, 
   bookings, 
+  reviews = [], 
   onSmartBook, 
   showToast, 
   onSelectStudent,
   externalBookingModalOpen, 
   setExternalBookingModalOpen,
   viewMode = 'day',
-  setViewMode
+  setViewMode,
+  openGlobalBooking
 }: {
   userRole: 'admin' | 'teacher'; 
   currentUserId: string; 
   teachers: Record<string, TeacherProfile>;
   students: StudentItem[]; 
   bookings: BookingItem[]; 
+  reviews?: ReviewItem[]; 
   onSmartBook: (newBk: BookingItem) => void; 
   showToast: (msg: string) => void; 
   onSelectStudent: (name: string) => void;
@@ -55,6 +61,7 @@ export default function Tab1StudioCalendar({
   setExternalBookingModalOpen?: (open: boolean) => void;
   viewMode?: 'day' | 'week';
   setViewMode?: (mode: 'day' | 'week') => void;
+  openGlobalBooking: (preset?: any) => void;
 }) {
   const [localView, setLocalView] = useState<'week' | 'day'>('day');
   const view = viewMode || localView;
@@ -69,25 +76,96 @@ export default function Tab1StudioCalendar({
     if (setExternalBookingModalOpen) setExternalBookingModalOpen(false);
   };
 
-  const baseDate = new Date(2026, 9, 24);
+  // 1. 將 systemBaseDate 字串轉換為可運算的 Date 物件
+  const [sysYear, sysMonth, sysDay] = systemBaseDate.split('-').map(Number);
+  const baseDate = new Date(sysYear, sysMonth - 1, sysDay); // JavaScript 月份從 0 開始
+  
+  // 2. 依據使用者的位移 (dayOffset) 算出當前畫面的日期
   baseDate.setDate(baseDate.getDate() + dayOffset);
   const currentStr = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(baseDate.getDate()).padStart(2, '0')}`;
   
-  const isToday = currentStr === '2026-10-24';
-  const isPastDate = currentStr < '2026-10-24';
+  // 3. 動態判定：今天與過去，都以 systemBaseDate 為基準
+  const isToday = currentStr === systemBaseDate;
+  const isPastDate = currentStr < systemBaseDate;
 
-  const firstStudent = students[0];
-  const initialPreset = getStudentBookingPreset(firstStudent, userRole);
+  // 1. 課堂是否已被取消判定（一般取消、審核免罰取消、審核計罰取消，皆視為已釋出空位）
+  // 課堂是否在排班總覽隱藏（釋出空位）：已取消 或 取消審核中，排班總覽一律不佔位，讓其他老師可直接預約
+  const isCancelledBooking = (b: BookingItem) => {
+    if (b.status === 'cancelled_normal' || b.status === 'special_approved' || b.status === 'special_rejected') {
+      return true;
+    }
+    const relatedRev = reviews.find(r => r.bookingId === b.id && r.status === 'pending');
+    if (relatedRev && relatedRev.reviewType === 'cancel') {
+      return true;
+    }
+    return false;
+  };
 
+  // 取得審核卡片的精準標籤文字（改室審核 / 優先審核）
+  const getReviewBadgeLabel = (bookingId: string) => {
+    const rev = reviews.find(r => r.bookingId === bookingId && r.status === 'pending');
+    if (!rev) return '審核中';
+    if (rev.reviewType === 'room_change') return '改室審核';
+    if (rev.reason?.includes('優先')) return '優先審核';
+    return '審核中';
+  };
+
+  // 2. 嚴格過濾：無論管理者 Daisy 還是任課老師，一律只抓取「自己名下」的有效學員
+  const myStudents = useMemo(() => {
+    return students.filter(s => s.teacherId === currentUserId && s.status === 'active');
+  }, [students, currentUserId]);
+
+  const firstMyStudent = myStudents[0];
+  const initialPreset = getStudentBookingPreset(firstMyStudent, userRole);
+  
   const [modalForm, setModalForm] = useState({ 
     date: currentStr, 
     hour: '10', 
     minute: '00', 
-    studentName: firstStudent?.name || '', 
+    studentName: firstMyStudent?.name || '', 
     lessonType: initialPreset.lessonType, 
-    roomType: initialPreset.roomType 
+    // 管理者 Daisy 預設大教室，一般老師預設小教室（若為 1v2 則大教室）
+    roomType: userRole === 'admin' ? ('large' as const) : initialPreset.roomType 
   });
 
+  // 3. 當彈窗開啟時，自動重設為當前操作者的名下首位學員與對應預設教室
+  useEffect(() => {
+    if (isModalOpen && myStudents.length > 0) {
+      const preset = getStudentBookingPreset(myStudents[0], userRole);
+      setModalForm(prev => ({
+        ...prev,
+        date: currentStr,
+        studentName: myStudents[0].name,
+        lessonType: preset.lessonType,
+        roomType: userRole === 'admin' ? 'large' : preset.roomType
+      }));
+    }
+  }, [isModalOpen, currentStr, currentUserId, userRole]);
+  // 正式架構：直接向 teachers 物件讀取顏色，新增 100 位老師也完全不用改代碼！
+  const getBookingStyle = (b: any) => {
+    const isOwn = b.teacherId === currentUserId;
+    const canView = userRole === 'admin' || isOwn;
+
+    if (!canView) {
+      // 一般老師看別人的課：保持灰色隱私遮罩
+      return 'bg-slate-100 border border-slate-200 text-slate-500';
+    }
+
+    // 1. 動態從 props 傳進來的 teachers 字典抓取該老師的設定
+    const t = teachers[b.teacherId];
+    
+    // 2. 如果資料庫有設定就用資料庫的，找不到才給預設值
+    const bg = t?.bgLight || 'bg-slate-100';
+    const text = t?.text || 'text-slate-900';
+    // 實線邊框：取老師的主色 (例如 bg-sky-500 轉為 border-sky-500)
+    const borderColor = t?.color ? t.color.replace('bg-', 'border-') : 'border-slate-500';
+
+    // 3. 簽名實線判定
+    if (b.signed) {
+      return `${bg} ${text} border-b-[4px] ${borderColor} opacity-95`;
+    }
+    return `${bg} ${text} border border-transparent`;
+  };
   const weekScrollRef = useRef<HTMLDivElement>(null);
   const dayScrollRef = useRef<HTMLDivElement>(null);
 
@@ -116,8 +194,8 @@ export default function Tab1StudioCalendar({
         dateStr: str, 
         label: formatDateWithDay(str), 
         dayIndex,
-        isPast: str < '2026-10-24', 
-        isToday: str === '2026-10-24' 
+        isPast: str < systemBaseDate,
+        isToday: str === systemBaseDate,
       };
     });
   }, [baseDate]);
@@ -177,40 +255,139 @@ export default function Tab1StudioCalendar({
   };
 
   const handleQuickBook = (h: number, m: string, room: string, date: string) => {
-    if (date < '2026-10-24') return alert('無法預約過去的時段');
-    const targetStudent = students[0];
+    // 檢查是否為過去時段（基於全域基準日 systemBaseDate）
+    if (date < systemBaseDate) {
+      const confirmPast = confirm(`【補排過去課堂提醒】\n您選擇的日期為過去時段（${date}）。\n確定要補排此時段的預約嗎？`);
+      if (!confirmPast) return;
+    }
+
+    if (myStudents.length === 0) return alert('您名下目前無有效學員，無法進行預約');
+
+    const targetStudent = myStudents[0];
     const preset = getStudentBookingPreset(targetStudent, userRole);
-    setModalForm({ 
+    openGlobalBooking({ 
       date, 
       hour: String(h), 
       minute: m, 
       roomType: room as any, 
-      studentName: targetStudent?.name || '', 
+      studentName: targetStudent.name, 
       lessonType: preset.lessonType 
     });
-    setLocalBookingModal(true);
   };
-
+  
+  const handleBookingDateChange = (newDate: string) => {
+    if (newDate < systemBaseDate) {
+      const confirmPast = confirm(
+        `【補排過去課堂提醒】\n您選擇的日期（${newDate}）已是過去時間。\n確定要安排過去時段的預約嗎？`
+      );
+      if (!confirmPast) {
+        // 使用者按取消，還原回今天的基準日
+        setModalForm((prev: any) => ({ ...prev, date: systemBaseDate }));
+        return;
+      }
+    }
+    setModalForm((prev: any) => ({ ...prev, date: newDate }));
+  };
   const submitBooking = () => {
     const h = parseInt(modalForm.hour, 10);
     const m = parseInt(modalForm.minute, 10);
-    const targetStudent = students.find(s => s.name === modalForm.studentName);
+    const targetStudent = myStudents.find(s => s.name === modalForm.studentName);
 
-    const conflict = checkGlobalConflict({
-      dateStr: modalForm.date,
-      startHour: h,
-      startMin: m,
-      durationMins: 50,
-      roomType: modalForm.roomType,
-      teacherId: currentUserId,
-      studentId: targetStudent?.id,
-      existingBookings: bookings,
-      teachersMap: teachers,
-      studentsMap
+    if (!targetStudent) {
+      return alert('請選擇有效的名下學員');
+    }
+
+    const reqStart = h * 60 + m;
+    const reqEnd = reqStart + 50;
+    // --- 1. 檢驗智慧對調條件 (嚴格防堵跨時段重疊) ---
+    // 找出大教室內「所有」與本次預約重疊的課堂
+    const overlappingInLargeRoom = bookings.filter(b => {
+      if (isCancelledBooking(b)) return false;
+      if (b.date !== modalForm.date || b.roomType !== 'large') return false;
+      const bStart = b.startHour * 60 + b.startMin;
+      const bEnd = bStart + (b.durationMins || 50);
+      return !(reqEnd <= bStart || reqStart >= bEnd);
     });
 
-    if (conflict.hasConflict) {
-      return alert(`衝堂警告：${conflict.reason}`);
+    const hasOverlapping = overlappingInLargeRoom.length > 0;
+    
+    // 嚴格判定：所有重疊的課堂「必須全部都是 1v1」，只要卡著一個 1v2 就絕對不准換
+    const allOverlappingAre1v1 = hasOverlapping && overlappingInLargeRoom.every(b => b.lessonType === '1v1');
+
+    // 檢查小教室在「所有即將被位移的課堂時段內」是否都有空
+    const isSmallRoomFreeForDisplaced = hasOverlapping && !bookings.some(b => {
+      if (isCancelledBooking(b)) return false;
+      if (b.date !== modalForm.date || b.roomType !== 'small') return false;
+      const bStart = b.startHour * 60 + b.startMin;
+      const bEnd = bStart + (b.durationMins || 50);
+      
+      // 拿小教室的課，去跟「準備要退去小教室的課」做時間重疊比對
+      return overlappingInLargeRoom.some(displacedBk => {
+         const dStart = displacedBk.startHour * 60 + displacedBk.startMin;
+         const dEnd = dStart + (displacedBk.durationMins || 50);
+         return !(bEnd <= dStart || bStart >= dEnd);
+      });
+    });
+
+    // 條件：本次預約為 1v2 大教室
+    const isBooking1v2InLarge = modalForm.lessonType === '1v2' && modalForm.roomType === 'large';
+
+    // 通用對調成立：新課為 1v2 大教室 + 原佔用「全部」為 1v1 + 小教室有空 ➔ 直接放行
+    const canAutoSwap = isBooking1v2InLarge && allOverlappingAre1v1 && isSmallRoomFreeForDisplaced;
+
+    // --- 2. 若不符合對調條件，才執行正規衝堂檢查 ---
+    if (!canAutoSwap) {
+      const conflictBooking = bookings.find(b => {
+        if (isCancelledBooking(b)) return false;
+        if (b.date !== modalForm.date) return false;
+
+        const bStart = b.startHour * 60 + b.startMin;
+        const bEnd = bStart + (b.durationMins || 50);
+        const isOverlapping = !(reqEnd <= bStart || reqStart >= bEnd);
+        if (!isOverlapping) return false;
+
+        return b.roomType === modalForm.roomType || b.teacherId === currentUserId || b.studentId === targetStudent.id;
+      });
+
+      if (conflictBooking) {
+        const roomLabel = conflictBooking.roomType === 'large' ? '大教室' : '小教室';
+        const timeStartStr = formatTimeStr(conflictBooking.startHour, conflictBooking.startMin);
+        const endTotalMins = conflictBooking.startHour * 60 + conflictBooking.startMin + (conflictBooking.durationMins || 50);
+        const timeEndStr = formatTimeStr(Math.floor(endTotalMins / 60), endTotalMins % 60);
+        const timeRange = `${timeStartStr} ~ ${timeEndStr}`;
+
+        // 判斷衝堂類型 (可能同時具備多種衝突)
+        const isTeacherConflict = conflictBooking.teacherId === currentUserId;
+        const isStudentConflict = conflictBooking.studentId === targetStudent.id;
+        const isRoomConflict = conflictBooking.roomType === modalForm.roomType;
+
+        const conflictTypes = [];
+        if (isTeacherConflict) conflictTypes.push('老師時間');
+        if (isStudentConflict) conflictTypes.push('學員時間');
+        if (isRoomConflict) conflictTypes.push('教室空間');
+        const conflictReason = conflictTypes.join('與') + '衝堂';
+
+        if (userRole === 'admin') {
+          // 管理員視角：顯示所有詳細資訊
+          const tObj = teachers[conflictBooking.teacherId];
+          const teacherName = tObj?.name || '老師';
+          return alert(`【${conflictReason}】\n${roomLabel}（${timeRange}）已被 [${teacherName}] 預約：${conflictBooking.studentName} (${conflictBooking.lessonType})`);
+        } else {
+          // 一般老師視角：依據權限遮蔽
+          if (isTeacherConflict || isStudentConflict) {
+            // 是老師自己的課，或是自己學員的課 ➔ 明確指出是誰衝堂
+            let conflictSubject = '';
+            if (isTeacherConflict && isStudentConflict) conflictSubject = '您與該學員在此時段皆';
+            else if (isTeacherConflict) conflictSubject = '您在此時段';
+            else if (isStudentConflict) conflictSubject = '該學員在此時段';
+
+            return alert(`【${conflictReason}】\n${conflictSubject}已有預約：${roomLabel}（${timeRange}）${conflictBooking.studentName} (${conflictBooking.lessonType})`);
+          } else {
+            // 是別人的課（單純教室空間被佔用）➔ 隱私遮罩，只顯示時段與類別
+            return alert(`【${conflictReason}】\n該時段 ${roomLabel}（${timeRange}）已有預約 (${conflictBooking.lessonType})，請選擇其他時段或教室。`);
+          }
+        }
+      }
     }
     
     const newBk: BookingItem = {
@@ -221,7 +398,7 @@ export default function Tab1StudioCalendar({
       durationMins: 50,
       teacherId: currentUserId,
       studentName: modalForm.studentName,
-      studentId: targetStudent?.id || '',
+      studentId: targetStudent.id,
       roomType: modalForm.roomType as any,
       lessonType: modalForm.lessonType as any,
       status: 'confirmed',
@@ -233,7 +410,7 @@ export default function Tab1StudioCalendar({
   };
 
   return (
-    <div className="space-y-2.5 h-full flex flex-col">
+    <div className="flex-1 min-h-0 flex flex-col space-y-2 pb-1">
       
       {/* 日期時間切換列：< 10/24(六) > */}
       <div className="flex items-center justify-between bg-white px-3 py-1.5 rounded-2xl border border-slate-200 shadow-2xs text-xs shrink-0">
@@ -320,13 +497,12 @@ export default function Tab1StudioCalendar({
                     </div>
                   ))}
                   
-                  {bookings.filter(b => b.date === currentStr && b.roomType === room && b.status !== 'cancelled_normal').map(b => {
-                    // 每 10 分鐘 10px，計算垂直位置與高度
+                  {bookings.filter(b => b.date === currentStr && b.roomType === room && !isCancelledBooking(b)).map(b => {
                     const top = ((b.startHour - 8) * 60 + b.startMin);
                     const isMyStudentCard = b.teacherId === currentUserId;
                     const canSeeDetails = userRole === 'admin' || isMyStudentCard;
-                    const t = teachers[b.teacherId];
                     const is1v2InSmall = b.lessonType === '1v2' && b.roomType === 'small';
+                    const isPendingReview = b.status === 'special_pending';
 
                     return (
                       <div 
@@ -335,31 +511,47 @@ export default function Tab1StudioCalendar({
                           if (isMyStudentCard) {
                             onSelectStudent(b.studentName || '');
                           } else if (userRole === 'admin') {
-                            showToast('管理者無法檢視其他老師學員之私密內頁');
+                            showToast('無法檢視其他老師學員內頁');
                           }
                         }} 
                         style={{ top: `${top}px`, height: `${b.durationMins || 50}px` }} 
                         className={`absolute inset-x-1 z-10 rounded-lg p-1 flex flex-col justify-center shadow-2xs select-none transition ${
                           isMyStudentCard ? 'cursor-pointer hover:scale-[1.01]' : 'cursor-default'
-                        } ${canSeeDetails ? t?.bgLight : 'bg-slate-200 opacity-90'} ${
+                        } ${
+                          isPendingReview 
+                            ? 'bg-amber-50/95 border-2 border-dashed border-amber-400 text-amber-950' 
+                            : getBookingStyle(b)
+                        } ${
                           is1v2InSmall ? 'border-2 border-rose-500 ring-2 ring-rose-200 shadow-md animate-pulse' : ''
                         }`}
                       >
-                        {is1v2InSmall && (
+                        {isPendingReview && (
+                          <div className="absolute top-0.5 right-1 z-20">
+                            <span className="text-[8px] bg-amber-500 text-white font-black px-1 py-0.5 rounded shadow-2xs">
+                              {getReviewBadgeLabel(b.id)}
+                            </span>
+                          </div>
+                        )}
+
+                        {is1v2InSmall && !isPendingReview && (
                           <div className="absolute top-0.5 right-1 flex items-center gap-1">
                             <span className="text-[8px] bg-rose-600 text-white px-1 rounded font-bold">1v2 小教室</span>
                             <span className="w-2 h-2 bg-rose-500 rounded-full animate-ping" />
                           </div>
                         )}
+
                         {canSeeDetails ? (
                           <>
-                            <div className={`text-xs font-black truncate ${t?.text}`}>{b.studentName}</div>
-                            <div className={`text-[10px] font-bold ${t?.text} opacity-90 leading-tight mt-0.5`}>
-                              {formatTimeStr(b.startHour, b.startMin)} <span className="bg-white/60 px-1 rounded ml-0.5">{b.lessonType}</span>
+                            <div className="text-xs font-black truncate">{b.studentName}</div>
+                            <div className="text-[10px] font-bold opacity-90 leading-tight mt-0.5">
+                              {formatTimeStr(b.startHour, b.startMin)} <span className="bg-white/60 px-1 rounded ml-0.5 text-slate-800">{b.lessonType}</span>
                             </div>
                           </>
                         ) : (
-                          <div className="flex items-center justify-center font-bold text-slate-500 text-[10px]"><Lock className="w-2.5 h-2.5 mr-1" />預約</div>
+                          <div className="flex items-center justify-center font-bold text-[11px] gap-1 font-mono opacity-80">
+                            <Lock className="w-3 h-3 shrink-0" />
+                            <span>{b.lessonType}</span>
+                          </div>
                         )}
                       </div>
                     );
@@ -413,13 +605,13 @@ export default function Tab1StudioCalendar({
                             ))}
                           </div>
                         ))}
-                        
-                        {bookings.filter(b => b.date === item.dateStr && b.roomType === room && b.status !== 'cancelled_normal').map(b => {
+
+                        {bookings.filter(b => b.date === item.dateStr && b.roomType === room && !isCancelledBooking(b)).map(b => {
                           const top = ((b.startHour - 8) * 60 + b.startMin);
                           const isMyStudentCard = b.teacherId === currentUserId;
                           const canSeeDetails = userRole === 'admin' || isMyStudentCard;
-                          const t = teachers[b.teacherId];
                           const is1v2InSmall = b.lessonType === '1v2' && b.roomType === 'small';
+                          const isPendingReview = b.status === 'special_pending';
 
                           return (
                             <div 
@@ -428,24 +620,42 @@ export default function Tab1StudioCalendar({
                                 if (isMyStudentCard) {
                                   onSelectStudent(b.studentName || '');
                                 } else if (userRole === 'admin') {
-                                  showToast('管理員無法檢視其他老師學員之私密內頁');
+                                  showToast('無法檢視其他老師學員內頁');
                                 }
                               }} 
                               style={{ top: `${top}px`, height: `${b.durationMins || 50}px` }} 
                               className={`absolute inset-x-0.5 z-10 rounded p-1 flex flex-col justify-center shadow-2xs select-none transition ${
                                 isMyStudentCard ? 'cursor-pointer hover:scale-[1.02]' : 'cursor-default'
-                              } ${canSeeDetails ? t?.bgLight : 'bg-slate-200 opacity-90'} ${
+                              } ${
+                                isPendingReview 
+                                  ? 'bg-amber-50/95 border border-dashed border-amber-400 text-amber-950' 
+                                  : getBookingStyle(b)
+                              } ${
                                 is1v2InSmall ? 'border border-rose-500 animate-pulse ring-1 ring-rose-300' : ''
                               }`}
                             >
-                              {is1v2InSmall && <span className="absolute top-0.5 right-0.5 w-2 h-2 bg-rose-500 rounded-full animate-ping shadow-sm" />}
+                              {isPendingReview ? (
+                                <span className="text-[8px] bg-amber-500 text-white font-black px-1 py-0.2 rounded text-center self-center mb-0.5">
+                                  {getReviewBadgeLabel(b.id)}
+                                </span>
+                              ) : is1v2InSmall ? (
+                                <span className="absolute top-0.5 right-0.5 w-2 h-2 bg-rose-500 rounded-full animate-ping shadow-sm" />
+                              ) : null}
+
                               {canSeeDetails ? (
                                 <>
-                                  <span className={`text-xs font-black truncate text-center ${t?.text}`}>{b.studentName}</span>
-                                  <span className={`text-[10px] font-mono text-center font-bold ${t?.text} mt-0.5`}>{b.lessonType}</span>
+                                  <span className="text-xs font-black truncate text-center">
+                                    {b.studentName}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-center font-bold mt-0.5">
+                                    {b.lessonType}
+                                  </span>
                                 </>
                               ) : (
-                                <span className="text-[10px] font-bold text-center text-slate-500">🔒</span>
+                                <span className="text-[10px] font-mono font-bold text-center flex items-center justify-center gap-0.5 opacity-80">
+                                  <Lock className="w-2.5 h-2.5 shrink-0" />
+                                  <span>{b.lessonType}</span>
+                                </span>
                               )}
                             </div>
                           );
@@ -474,22 +684,29 @@ export default function Tab1StudioCalendar({
             </div>
             
             <div className="space-y-2.5">
-              {/* 學員選擇 (去贅字「預設」，直接顯示類別) */}
+              {/* 學員選擇：嚴格只列出當前操作者名下學員 */}
               <div>
-                <label className="text-slate-600 font-bold block mb-1">選擇學員</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-slate-600 font-bold">選擇學員</label>
+                  {/* <span className="text-[10px] text-slate-400 font-medium">僅顯示您名下的學員</span>*/}
+                </div>
                 <select 
                   value={modalForm.studentName} 
                   onChange={(e) => handleStudentSelect(e.target.value)} 
                   className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
                 >
-                  {students.map(s => {
-                    const preset = getStudentBookingPreset(s, userRole);
-                    return (
-                      <option key={s.id} value={s.name}>
-                        {s.name} ({s.credits}堂) - {preset.lessonType}
-                      </option>
-                    );
-                  })}
+                  {myStudents.length === 0 ? (
+                    <option value="" disabled>目前名下無有效學員</option>
+                  ) : (
+                    myStudents.map(s => {
+                      const preset = getStudentBookingPreset(s, userRole);
+                      return (
+                        <option key={s.id} value={s.name}>
+                          {s.name} ({s.credits}堂) - {preset.lessonType}
+                        </option>
+                      );
+                    })
+                  )}
                 </select>
               </div>
 
@@ -510,7 +727,7 @@ export default function Tab1StudioCalendar({
                   <label className="text-slate-600 font-bold block mb-1">時 (Hour)</label>
                   <select 
                     value={modalForm.hour} 
-                    onChange={(e) => setModalForm({ ...modalForm, hour: e.target.value })} 
+                    onChange={(e) => handleBookingDateChange(e.target.value)}
                     className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
                   >
                     {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}

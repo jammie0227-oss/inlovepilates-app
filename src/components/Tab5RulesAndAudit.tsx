@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X } from 'lucide-react';
+import { formatDateWithDay, formatTimeStr } from '../mockData';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -49,8 +50,14 @@ export default function Tab5RulesAndAudit({
     });
   }, [logs, userRole, currentUserId]);
 
+  // 判定是否為需要已讀確認的通知（僅限「系統調度」與「改室」）
+  const isRoomSwapNotice = (l: any) => {
+    return l.typeStr === '調度' || l.typeStr === '改室';
+  };
+
+  // 僅針對「調度」或「改室」計算未讀紅點數量，管理者審核案件不佔用未讀紅點
   const unreadCount = useMemo(() => {
-    return displayLogs.filter((l: any) => !l.read && (l.category === 'red' || l.category === 'yellow')).length;
+    return displayLogs.filter((l: any) => !l.read && isRoomSwapNotice(l)).length;
   }, [displayLogs]);
 
   const pendingReviews = useMemo(() => reviews.filter((r: any) => r.status === 'pending'), [reviews]);
@@ -192,21 +199,43 @@ export default function Tab5RulesAndAudit({
                       </div>
                     </div>
 
-                    {/* 展開詳細內容：[色標圓點] 課程日期時間 學生名 1v1 (完全移除聯絡電話) */}
+                    {/* 展開詳細內容：清楚標註「🟣 大教室 / 🟢 小教室」文字與異動目標 */}
                     {isExpanded ? (
-                      <div className="p-2.5 bg-slate-50 rounded-xl text-xs text-slate-700 space-y-1.5 border border-slate-100 animate-in fade-in duration-150">
-                        <p className="font-medium"><span className="text-slate-400">事由：</span>{item.reason}</p>
+                      <div className="p-2.5 bg-slate-50 rounded-xl text-xs text-slate-700 space-y-2 border border-slate-100 animate-in fade-in duration-150">
+                        <p className="font-medium"><span className="text-slate-400 font-sans">事由：</span>{item.reason}</p>
                         
-                        <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-800 pt-0.5">
-                          <span 
-                            className={`w-2.5 h-2.5 rounded-full shrink-0 shadow-2xs ${isLargeRoom ? 'bg-purple-500' : 'bg-emerald-500'}`} 
-                            title={isLargeRoom ? '大教室' : '小教室'} 
-                          />
-                          <span className="font-bold">{item.time}</span>
-                          <span className="font-sans font-black text-slate-900">{item.studentName || ''}</span>
-                          <span className="bg-slate-200/70 text-slate-700 px-1.5 py-0.2 rounded text-[10px] font-bold">
-                            {item.lessonType || '1v1'}
-                          </span>
+                        <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-800 pt-1 border-t border-slate-200/60">
+                          {/* 原課堂資訊（帶完整教室名稱） */}
+                          <div className="flex items-center gap-1">
+                            <span className="text-slate-400 font-sans">原課堂：</span>
+                            <span className="font-bold text-slate-700 font-sans">
+                              {isLargeRoom ? '🟣 大教室' : '🟢 小教室'}
+                            </span>
+                            <span className="font-bold ml-1">{item.time}</span>
+                            <span className="font-sans font-black text-slate-900 ml-1">{item.studentName || ''}</span>
+                            <span className="bg-slate-200/80 text-slate-700 px-1.5 py-0.2 rounded text-[10px] font-bold font-sans">
+                              {item.lessonType || '1v1'}
+                            </span>
+                          </div>
+
+                          {/* 若為改室申請，補充顯示欲改至的目標教室 */}
+                          {item.reviewType === 'room_change' && item.reqRoom && (
+                            <div className="flex items-center gap-1 text-purple-700 font-bold font-sans">
+                              <span className="text-slate-400">➔ 改至：</span>
+                              <span>{item.reqRoom === 'large' ? '🟣 大教室' : '🟢 小教室'}</span>
+                            </div>
+                          )}
+
+                          {/* 若為改期申請，統一套用智慧日期格式化 */}
+                          {item.reviewType === 'reschedule' && item.reqDate && (
+                            <div className="flex items-center gap-1 text-rose-600 font-bold font-sans">
+                              <span className="text-slate-400">➔ 改至：</span>
+                              <span>{item.reqRoom === 'large' ? '🟣 大教室' : '🟢 小教室'}</span>
+                              <span className="font-mono font-bold">
+                                {formatDateWithDay(item.reqDate)} {formatTimeStr(item.reqHour ?? 0, item.reqMin ?? 0)}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ) : (
@@ -337,7 +366,7 @@ export default function Tab5RulesAndAudit({
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0" onClick={e => e.stopPropagation()}>
-                      {/* Undo：審核/核准紀錄一律顯示純 Icon */}
+                      {/* Undo：管理員撤銷審核結果按鈕 */}
                       {userRole === 'admin' && l.reviewId && (
                         <button 
                           onClick={() => { 
@@ -351,11 +380,12 @@ export default function Tab5RulesAndAudit({
                         </button>
                       )}
 
-                      {!isNormal && (
+                      {/* 核心校正：只有「系統安排調度」或「改室」才需要已讀／未讀切換，其餘紀錄不需顯示 */}
+                      {isRoomSwapNotice(l) && (
                         <button 
                           onClick={() => setLogs(logs.map((i: any) => i.id === l.id ? { ...i, read: !i.read } : i))}
                           className={`text-[10px] px-2 py-0.5 rounded-md font-bold border transition ${
-                            l.read ? 'text-slate-400 bg-white/70 border-transparent' : 'text-blue-600 bg-blue-50 border-blue-200'
+                            l.read ? 'text-slate-400 bg-white/70 border-transparent' : 'text-blue-600 bg-blue-50 border-blue-200 shadow-2xs animate-pulse'
                           }`}
                         >
                           {l.read ? '已讀' : '未讀'}
