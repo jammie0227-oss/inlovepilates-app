@@ -1,32 +1,11 @@
 'use client';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3, X, ZoomIn, AlertTriangle } from 'lucide-react';
-import { formatTimeStr, formatDateWithDay, getDayOfWeek, checkGlobalConflict } from '../mockData';
+import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3, X } from 'lucide-react';
+import { formatTimeStr, formatDateWithDay, getDayOfWeek } from '../mockData';
 import { BookingStatusBadge, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
-
-// 判斷學員預約預設類別與教室
-const getStudentBookingPreset = (student: any, userRole: 'admin' | 'teacher') => {
-  if (!student) {
-    return {
-      lessonType: '1v1' as const,
-      roomType: userRole === 'admin' ? ('large' as const) : ('small' as const)
-    };
-  }
-
-  const has1v2Rule = student.rules?.some((r: any) => r.lessonType === '1v2');
-  const is1v2Preferred = has1v2Rule || student.defaultLessonType === '1v2' || student.lessonType === '1v2';
-
-  const lessonType = is1v2Preferred ? ('1v2' as const) : ('1v1' as const);
-  
-  let roomType: 'large' | 'small' = 'small';
-  if (userRole === 'admin') {
-    roomType = 'large';
-  } else {
-    roomType = is1v2Preferred ? 'large' : 'small';
-  }
-
-  return { lessonType, roomType };
-};
+import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
+import { isOverdueUnsettled, isCancelledBooking, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours } from '../utils/bookingRules';
+import { systemAlert } from '../utils/systemAlert';
 
 export default function Tab2PersonalSchedule({
   systemBaseDate,
@@ -34,21 +13,29 @@ export default function Tab2PersonalSchedule({
   currentUserId, 
   teachers, 
   bookings, 
-  onAddBookings,
   onProcessSettlement,
-  onSmartBook,
+  onRequestSettlementUndo,
+  reviews = [],
+  businessHours = DEFAULT_BUSINESS_HOURS,
+  priorityGrid,
   onExecuteReschedule,
   students, 
   onSign, 
   onUpdateBookingNote, 
   showToast, 
   onSelectStudent,
-  externalBookingModalOpen,
-  setExternalBookingModalOpen,
   viewMode = 'day',
   setViewMode,
   openGlobalBooking
 }: any) {
+  // 非營業時間 / 公休日：淡灰斜線底（與 Tab 1 一致）
+  const isClosedSlot = (dateStr: string, h: number) =>
+    !isWithinBusinessHours(dateStr, h, 0, businessHours, 60);
+  const closedStyle = (dateStr: string, h: number): React.CSSProperties | undefined =>
+    isClosedSlot(dateStr, h)
+      ? { backgroundImage: 'repeating-linear-gradient(135deg, rgba(148,163,184,0.18) 0, rgba(148,163,184,0.18) 4px, transparent 4px, transparent 8px)', backgroundColor: 'rgba(241,245,249,0.7)' }
+      : undefined;
+
   const [localView, setLocalView] = useState<'month' | 'week' | 'day'>('day');
   const view = viewMode || localView;
   const setView = setViewMode || setLocalView;
@@ -59,7 +46,7 @@ export default function Tab2PersonalSchedule({
   const [isOverdueExpanded, setIsOverdueExpanded] = useState(false);
   const [isMonthEndModalOpen, setIsMonthEndModalOpen] = useState(false);
   const [settlementDrafts, setSettlementDrafts] = useState<
-    Record<string, { report: 'attended_unsigned' | 'unattended_not_cancelled'; reason: string }>
+    Record<string, { report: 'attended_unsigned' | 'unattended_not_cancelled' | 'pending'; reason: string }>
   >({});
 
   // 1. 動態解析全局基準日
@@ -71,17 +58,15 @@ export default function Tab2PersonalSchedule({
 
   // 變更 / 取消 預約彈窗狀態
   const [editingBooking, setEditingBooking] = useState<any>(null);
-  const [rescheduleDate, setRescheduleDate] = useState(systemBaseDate);
-  const [rescheduleHour, setRescheduleHour] = useState('10');
-  const [rescheduleMin, setRescheduleMin] = useState('00');
-  const [rescheduleRoom, setRescheduleRoom] = useState<'large' | 'small'>('small');
-  const [rescheduleLessonType, setRescheduleLessonType] = useState<'1v1' | '1v2'>('1v1');
 
-  const [localBookingModal, setLocalBookingModal] = useState(false);
-  const isBookingModalOpen = externalBookingModalOpen || localBookingModal;
-  const closeBookingModal = () => {
-    setLocalBookingModal(false);
-    if (setExternalBookingModalOpen) setExternalBookingModalOpen(false);
+  // 申請結算更正（已鎖定之結算不可自行撤銷）
+  const [undoTarget, setUndoTarget] = useState<any>(null);
+  const [undoReason, setUndoReason] = useState('');
+  const submitUndoRequest = () => {
+    if (!undoReason.trim()) return systemAlert('請填寫申請結算更正的事由');
+    if (onRequestSettlementUndo) onRequestSettlementUndo(undoTarget.id, undoReason.trim());
+    setUndoTarget(null);
+    setUndoReason('');
   };
 
   const [activeSignModal, setActiveSignModal] = useState<{ id: string; studentName: string } | null>(null);
@@ -93,7 +78,7 @@ export default function Tab2PersonalSchedule({
   
   // 2. 基於 systemBaseDate 建立運算用日期
   const baseDate = new Date(sysYear, sysMonth - 1, sysDay);
-  if (view === 'month') baseDate.setMonth(baseDate.getMonth() + offset);
+  if (view === 'month') { baseDate.setDate(1); baseDate.setMonth(baseDate.getMonth() + offset); }
   if (view === 'week') baseDate.setDate(baseDate.getDate() + offset * 7);
   if (view === 'day') baseDate.setDate(baseDate.getDate() + offset);
 
@@ -101,24 +86,7 @@ export default function Tab2PersonalSchedule({
   const isToday = currentStr === systemBaseDate;
   const isPast = currentStr < systemBaseDate;
 
-  const firstStudent = students[0];
-  const initialPreset = getStudentBookingPreset(firstStudent, userRole);
-
-  const [modalForm, setModalForm] = useState({
-    date: currentStr,
-    hour: '10',
-    minute: '00',
-    studentName: firstStudent?.name || '',
-    lessonType: initialPreset.lessonType,
-    roomType: initialPreset.roomType
-  });
-
-  const hours = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
-  const minutes = ['00', '10', '20', '30', '40', '50'];
-
-  const studentsMap = useMemo(() => {
-    return Object.fromEntries(students.map((s: any) => [s.id, s]));
-  }, [students]);
+  const hours = getCalendarHours(businessHours, bookings);
 
   // 週曆 7 天日期生成
   const weekDays = useMemo(() => {
@@ -150,10 +118,8 @@ export default function Tab2PersonalSchedule({
   // 篩選當前老師「逾期未簽到且未取消」的課堂
   const myOverdueBookings = useMemo(() => {
     return bookings.filter((b: any) => {
-      if (b.status === 'cancelled_normal' || b.status === 'special_approved' || b.status === 'special_rejected') return false;
-      if (b.signed) return false;
-      // ✅ 修正：個人課表一律只看「自己」的課堂，無論身分為何
-      return b.teacherId === currentUserId && b.date <= todayStr;
+      // 個人課表一律只看「自己」的課堂；逾期＝嚴格早於基準日、有效、未簽、未鎖定
+      return b.teacherId === currentUserId && isOverdueUnsettled(b, todayStr);
     });
   }, [bookings, currentUserId, todayStr]);
 
@@ -230,7 +196,7 @@ export default function Tab2PersonalSchedule({
   useEffect(() => {
     if (view === 'week' && weekVerticalScrollRef.current) {
       const weekDatesSet = new Set(weekDays.map(w => w.dateStr));
-      const activeWeekBookings = myBookings.filter((b: any) => weekDatesSet.has(b.date) && b.status !== 'cancelled_normal');
+      const activeWeekBookings = myBookings.filter((b: any) => weekDatesSet.has(b.date) && !isCancelledBooking(b.status));
       
       if (activeWeekBookings.length > 0) {
         const earliestMins = Math.min(...activeWeekBookings.map((b: any) => b.startHour * 60 + b.startMin));
@@ -242,96 +208,20 @@ export default function Tab2PersonalSchedule({
     }
   }, [view, weekDays, myBookings]);
 
-  const isRescheduleUnchanged = useMemo(() => {
-    if (!editingBooking) return true;
-    const originalH = editingBooking.startHour;
-    const originalM = editingBooking.startMin < 10 ? `0${editingBooking.startMin}` : String(editingBooking.startMin);
-    const originalDate = editingBooking.date;
-    const originalRoom = editingBooking.roomType || 'small';
-    const originalType = editingBooking.lessonType || '1v1';
+  const openRescheduleModal = (b: any) => setEditingBooking(b);
 
-    return (
-      rescheduleDate === originalDate &&
-      parseInt(rescheduleHour, 10) === originalH &&
-      rescheduleMin === originalM &&
-      rescheduleRoom === originalRoom &&
-      rescheduleLessonType === originalType
-    );
-  }, [editingBooking, rescheduleDate, rescheduleHour, rescheduleMin, rescheduleRoom, rescheduleLessonType]);
-
-  const handleStudentSelect = (name: string) => {
-    const targetStudent = students.find((s: any) => s.name === name);
-    const preset = getStudentBookingPreset(targetStudent, userRole);
-    openGlobalBooking(prev => ({
-      ...prev,
-      studentName: name,
-      lessonType: preset.lessonType,
-      roomType: preset.roomType
-    }));
-  };
-
-  const submitBooking = () => {
-    const h = parseInt(modalForm.hour, 10);
-    const m = parseInt(modalForm.minute, 10);
-    const targetStudent = students.find((s: any) => s.name === modalForm.studentName);
-
-    const conflict = checkGlobalConflict({
-      dateStr: modalForm.date,
-      startHour: h,
-      startMin: m,
-      durationMins: 50,
-      roomType: modalForm.roomType,
-      teacherId: currentUserId,
-      studentId: targetStudent?.id,
-      existingBookings: bookings,
-      teachersMap: teachers,
-      studentsMap
-    });
-
-    if (conflict.hasConflict) {
-      return alert(`衝堂警告：${conflict.reason}`);
-    }
-
-    const newBk = {
-      id: `b-${Date.now()}`,
-      date: modalForm.date,
-      startHour: h,
-      startMin: m,
-      durationMins: 50,
-      teacherId: currentUserId,
-      studentName: modalForm.studentName,
-      studentId: targetStudent?.id || '',
-      roomType: modalForm.roomType as any,
-      lessonType: modalForm.lessonType as any,
-      status: 'confirmed',
-      signed: false
-    };
-
-    onSmartBook(newBk);
-    closeBookingModal();
-  };
-
-  const openRescheduleModal = (b: any) => {
-    setEditingBooking(b);
-    setRescheduleDate(b.date);
-    setRescheduleHour(String(b.startHour));
-    setRescheduleMin(b.startMin < 10 ? `0${b.startMin}` : String(b.startMin));
-    setRescheduleRoom(b.roomType || 'small');
-    setRescheduleLessonType(b.lessonType || '1v1');
-  };
-
-  const handleConfirmReschedule = (isCancel: boolean) => {
-    if (!editingBooking) return;
-    if (!isCancel && isRescheduleUnchanged) return;
-
+  const handleConfirmReschedule = (p: BookingEditConfirmPayload) => {
+    if (!p.isCancel && p.notice) showToast(p.notice);
     onExecuteReschedule(
-      editingBooking.id,
-      rescheduleDate,
-      parseInt(rescheduleHour, 10),
-      parseInt(rescheduleMin, 10),
-      rescheduleRoom,
-      isCancel,
-      rescheduleLessonType
+      p.bookingId,
+      p.date,
+      p.hour,
+      p.min,
+      p.roomType,
+      p.isCancel,
+      p.lessonType,
+      p.reason,
+      p.autoSwaps
     );
     setEditingBooking(null);
   };
@@ -493,24 +383,33 @@ export default function Tab2PersonalSchedule({
                     <span className="font-black text-slate-800 font-sans">{b.studentName}</span>
                   </div>
 
-                  // ✅ 替換為：
                   <div className="flex items-center gap-1.5">
-                    {b.status === 'cancelled_normal' ? (
-                      <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">正常取消</span>
-                    ) : b.status === 'special_rejected' ? (
-                      <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold">計罰取消</span>
-                    ) : b.status === 'special_approved' ? (
-                      <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold">免罰取消</span>
-                    ) : b.status === 'special_pending' ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">取消待審核</span>
-                    ) : (
-                      <BookingStatusBadge 
-                        booking={b} 
-                        onZoomSignature={setZoomedImage} 
-                      />
-                    )}
+                    <BookingStatusBadge booking={b} onZoomSignature={setZoomedImage} />
                   </div>
                 </div>
+                {(b.settlementType === 'system_deducted' || b.isSystemSigned) && (
+                  <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-900 space-y-0.5" onClick={e => e.stopPropagation()}>
+                    <p className="font-bold">⚡ 系統代結對帳憑證</p>
+                    <p>代結時間：<span className="font-mono">{b.systemSignedAt || b.signedAt || '—'}</span></p>
+                    <p>事由備註：{b.overdueReason || '—'}</p>
+                  </div>
+                )}
+                {b.isSettlementLocked && (
+                  <div className="flex items-center justify-between gap-2" onClick={e => e.stopPropagation()}>
+                    <span className="text-[10px] text-slate-500 font-bold">🔒 結算已送出，無法自行撤銷</span>
+                    {reviews.some((r: any) => r.bookingId === b.id && r.reviewType === 'settlement_undo' && r.status === 'pending') ? (
+                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">更正申請審核中</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => { setUndoTarget(b); setUndoReason(''); }}
+                        className="text-[11px] bg-white border border-slate-300 hover:bg-slate-100 px-2.5 py-1 rounded-lg font-bold transition"
+                      >
+                        申請結算更正
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="relative" onClick={e => e.stopPropagation()}>
                   <input
                     type="text"
@@ -534,15 +433,19 @@ export default function Tab2PersonalSchedule({
             <span className="text-rose-500">日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span className="text-indigo-500">六</span>
           </div>
           <div className="grid grid-cols-7 text-xs font-mono">
-            {Array.from({ length: 31 }).map((_, i) => {
+            {/* 依該月第一天的星期補齊前置空格 */}
+            {Array.from({ length: new Date(baseDate.getFullYear(), baseDate.getMonth(), 1).getDay() }).map((_, i) => (
+              <div key={`pad-${i}`} className="min-h-[75px] border-r border-b border-slate-100 bg-slate-50/40" />
+            ))}
+            {Array.from({ length: new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0).getDate() }).map((_, i) => {
               const dayNum = i + 1;
               const dateStr = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-              const dayBks = myBookings.filter(b => b.date === dateStr && b.status !== 'cancelled_normal');
+              const dayBks = myBookings.filter((b: any) => b.date === dateStr && !isCancelledBooking(b.status));
               const isMonthToday = dateStr === systemBaseDate;
               const isMonthPast = dateStr < systemBaseDate;
 
               return (
-                <div key={i} className={`min-h-[75px] border-r border-b border-slate-100 p-1 flex flex-col gap-0.5 transition ${
+                <div key={i} className={`min-h-[75px] min-w-0 overflow-hidden border-r border-b border-slate-100 p-1 flex flex-col gap-0.5 transition ${
                   isMonthPast ? 'bg-slate-20/40' : 'bg-white'
                 }`}>
                   <span className={`text-[11px] font-bold text-right mb-0.5 ${
@@ -605,16 +508,21 @@ export default function Tab2PersonalSchedule({
                       key={h} 
                       onClick={() => {
                         if (item.isPast) return;
-                        // 點擊空白處自動帶入該時間並開啟預約彈窗
-                        setModalForm(prev => ({ ...prev, date: item.dateStr, hour: h < 10 ? `0${h}` : String(h), minute: '00' }));
-                        if (setExternalBookingModalOpen) setExternalBookingModalOpen(true);
-                        else setLocalBookingModal(true);
+                        // 點擊空白處：統一呼叫全域預約入口，帶入該日期與整點
+                        openGlobalBooking({ date: item.dateStr, hour: String(h).padStart(2, '0') });
                       }}
-                      className="h-[60px] border-b border-slate-100 border-dotted cursor-pointer hover:bg-slate-50 transition" 
-                    />
+                      style={closedStyle(item.dateStr, h)}
+                      className="h-[60px] border-b border-slate-100 border-dotted cursor-pointer hover:bg-slate-50 transition relative" 
+                    >
+                      {isClosedSlot(item.dateStr, h) && (
+                        <span className="absolute inset-0 flex items-center justify-center text-[9px] text-slate-400/70 pointer-events-none select-none">
+                          {new Date(`${item.dateStr}T00:00:00`).getDay() === 0 ? '公休' : '非營業'}
+                        </span>
+                      )}
+                    </div>
                   ))}
-                  {myBookings.filter((b: any) => b.date === item.dateStr && b.status !== 'cancelled_normal').map((b: any) => {
-                    const top = (b.startHour - 8) * 60 + b.startMin;
+                  {myBookings.filter((b: any) => b.date === item.dateStr && !isCancelledBooking(b.status)).map((b: any) => {
+                    const top = (b.startHour - hours[0]) * 60 + b.startMin;
                     return (
                       <div
                         key={b.id}
@@ -634,217 +542,20 @@ export default function Tab2PersonalSchedule({
         </div>
       )}
 
-      {/* 變更 / 取消 預約 Modal */}
-      {editingBooking && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-3.5 animate-in zoom-in-95 border border-slate-100 text-xs">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-black text-slate-800">變更 / 取消預約 ({editingBooking.studentName})</h3>
-              <button onClick={() => setEditingBooking(null)} className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* 變更 / 取消 預約 Modal (共用元件) */}
+      <BookingEditModal
+        booking={editingBooking}
+        userRole={userRole}
+        systemBaseDate={systemBaseDate}
+        bookings={bookings}
+        businessHours={businessHours}
+        priorityGrid={priorityGrid}
+        teachers={teachers}
+        students={students}
+        onClose={() => setEditingBooking(null)}
+        onConfirm={handleConfirmReschedule}
+      />
 
-            <div className="p-2.5 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-2">
-              <span className={`w-3 h-3 rounded-full shrink-0 ${editingBooking.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
-              <div className="text-xs font-bold text-slate-800 flex-1">
-                <span className="font-mono">{formatDateWithDay(editingBooking.date)} {formatTimeStr(editingBooking.startHour, editingBooking.startMin)}</span>
-                <span className="ml-2 text-slate-500 font-sans">
-                  ({editingBooking.lessonType || '1v1'} · {editingBooking.roomType === 'large' ? '大教室' : '小教室'})
-                </span>
-              </div>
-            </div>
-
-            <div className="space-y-2.5">
-              <div>
-                <label className="font-bold text-slate-600 block mb-1">修改日期</label>
-                <input
-                  type="date"
-                  value={rescheduleDate}
-                  onChange={e => setRescheduleDate(e.target.value)}
-                  className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="font-bold text-slate-600 block mb-1">時 (Hour)</label>
-                  <select
-                    value={rescheduleHour}
-                    onChange={e => setRescheduleHour(e.target.value)}
-                    className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
-                  >
-                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-600 block mb-1">分 (10 分鐘為單位)</label>
-                  <select
-                    value={rescheduleMin}
-                    onChange={e => setRescheduleMin(e.target.value)}
-                    className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
-                  >
-                    {minutes.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="font-bold text-slate-600 block mb-1">教室選擇</label>
-                  <select
-                    value={rescheduleRoom}
-                    onChange={(e: any) => setRescheduleRoom(e.target.value)}
-                    className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
-                  >
-                    <option value="large">🟣 大教室</option>
-                    <option value="small">🟢 小教室</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-600 block mb-1">課程類別</label>
-                  <select
-                    value={rescheduleLessonType}
-                    onChange={(e: any) => setRescheduleLessonType(e.target.value)}
-                    className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
-                  >
-                    <option value="1v1">1v1 單人</option>
-                    <option value="1v2">1v2 雙人</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-100">
-              <button
-                onClick={() => handleConfirmReschedule(false)}
-                disabled={isRescheduleUnchanged}
-                className={`py-2.5 rounded-xl font-bold transition shadow-xs text-xs ${
-                  isRescheduleUnchanged
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
-                    : 'bg-slate-800 hover:bg-slate-700 text-white'
-                }`}
-              >
-                變更課堂
-              </button>
-              <button
-                onClick={() => handleConfirmReschedule(true)}
-                className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 py-2.5 rounded-xl font-bold transition shadow-xs text-xs"
-              >
-                取消課堂
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 新增預約 Modal */}
-      {isBookingModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-3.5 border border-slate-100 text-xs animate-in zoom-in-95">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-bold text-slate-800">新增預約</h3>
-              <button onClick={closeBookingModal} className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            
-            <div className="space-y-2.5">
-              <div>
-                <label className="text-slate-600 font-bold block mb-1">選擇學員</label>
-                <select 
-                  value={modalForm.studentName} 
-                  onChange={(e) => handleStudentSelect(e.target.value)} 
-                  className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
-                >
-                  {students.map((s: any) => {
-                    const preset = getStudentBookingPreset(s, userRole);
-                    return (
-                      <option key={s.id} value={s.name}>
-                        {s.name} ({s.credits}堂) - {preset.lessonType}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-slate-600 font-bold block mb-1">預約日期</label>
-                <input 
-                  type="date" 
-                  value={modalForm.date} 
-                  onChange={(e) => setModalForm({ ...modalForm, date: e.target.value })} 
-                  className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800" 
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">時 (Hour)</label>
-                  <select 
-                    value={modalForm.hour} 
-                    onChange={(e) => setModalForm({ ...modalForm, hour: e.target.value })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800" 
-                  >
-                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">分 (10 分鐘為單位)</label>
-                  <select 
-                    value={modalForm.minute} 
-                    onChange={(e) => setModalForm({ ...modalForm, minute: e.target.value })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800" 
-                  >
-                    {minutes.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">教室選擇</label>
-                  <select 
-                    value={modalForm.roomType} 
-                    onChange={(e) => setModalForm({ ...modalForm, roomType: e.target.value as any })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800" 
-                  >
-                    <option value="large">🟣 大教室</option>
-                    <option value="small">🟢 小教室</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">課程種類</label>
-                  <select 
-                    value={modalForm.lessonType} 
-                    onChange={(e) => setModalForm({ ...modalForm, lessonType: e.target.value as any })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800" 
-                  >
-                    <option value="1v1">1v1 單人</option>
-                    <option value="1v2">1v2 雙人</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="pt-2 flex gap-2">
-              <button 
-                onClick={closeBookingModal} 
-                className="flex-1 bg-slate-100 hover:bg-slate-200 transition py-2.5 rounded-xl font-bold text-slate-600"
-              >
-                取消
-              </button>
-              <button 
-                onClick={submitBooking} 
-                className="flex-1 bg-rose-500 hover:bg-rose-600 transition text-white py-2.5 rounded-xl font-bold shadow-xs"
-              >
-                確認預約
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      
       {/* 共用手寫簽名彈窗（自動判定一般簽到 vs 逾期補簽） */}
       <CanvasPadModal
         signModalTarget={activeSignModal}
@@ -860,6 +571,30 @@ export default function Tab2PersonalSchedule({
         zoomedSignature={zoomedImage}
         onClose={() => setZoomedImage(null)}
       />
+
+      {/* 申請結算更正 Modal */}
+      {undoTarget && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-3 border border-slate-100 text-xs">
+            <div className="flex justify-between items-center border-b border-slate-100 pb-2">
+              <h3 className="text-sm font-black text-slate-800">申請結算更正 ({undoTarget.studentName})</h3>
+              <button onClick={() => setUndoTarget(null)} className="p-1 hover:bg-slate-100 rounded-lg text-slate-400"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="font-mono font-bold text-slate-700">{formatDateWithDay(undoTarget.date)} {formatTimeStr(undoTarget.startHour, undoTarget.startMin)}</p>
+            <textarea
+              value={undoReason}
+              onChange={e => setUndoReason(e.target.value)}
+              rows={3}
+              placeholder="請填寫更正事由（必填），送出後由管理員審核..."
+              className="w-full border border-slate-300 rounded-xl p-2 outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
+            />
+            <div className="flex gap-2">
+              <button onClick={() => setUndoTarget(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 py-2.5 rounded-xl font-bold text-slate-600">取消</button>
+              <button onClick={submitUndoRequest} className="flex-1 bg-slate-900 hover:bg-slate-800 text-white py-2.5 rounded-xl font-bold">送出申請</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 月底結算逾期處理 Modal */}
       {isMonthEndModalOpen && (
@@ -881,7 +616,7 @@ export default function Tab2PersonalSchedule({
 
             <div className="flex-1 overflow-y-auto space-y-3.5 pr-1">
               {myOverdueBookings.map((b: any) => {
-                const draft = settlementDrafts[b.id] || { report: 'attended_unsigned', reason: '' };
+                const draft = settlementDrafts[b.id] || { report: 'pending' as const, reason: '' };
 
                 return (
                   <div key={b.id} className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5 shadow-2xs">
@@ -933,6 +668,21 @@ export default function Tab2PersonalSchedule({
                         <span className="text-[10px] opacity-75 font-normal">學生沒來忘記取消</span>
                       </button>
                     </div>
+
+                    {draft.report === 'pending' ? (
+                      <p className="text-[10px] text-slate-400 font-bold">尚未選擇：儲存結算時將暫不處理此堂</p>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setSettlementDrafts(prev => ({
+                          ...prev,
+                          [b.id]: { ...prev[b.id], report: 'pending' }
+                        }))}
+                        className="text-[11px] font-bold text-slate-500 hover:text-slate-800 underline underline-offset-2"
+                      >
+                        取消選擇／暫不處理
+                      </button>
+                    )}
 
                     <div>
                       <input

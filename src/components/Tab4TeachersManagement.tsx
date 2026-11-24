@@ -1,7 +1,11 @@
 'use client';
+import { genId } from '../utils/id';
 import React, { useState, useMemo } from 'react';
 import { Users, FileSpreadsheet, ChevronDown, ChevronUp, Mail, ArrowLeft, Edit3, X, UserPlus, Check, Lock } from 'lucide-react';
+import { BookingStatusBadge } from './SignatureModals';
 import { PRESET_COLORS, formatTimeStr, formatDateWithDay } from '../mockData';
+import { deriveMonthKeys, formatMonthKey, getTeacherStats as computeTeacherStats, monthKeyOf } from '../utils/bookingRules';
+import { systemAlert } from '../utils/systemAlert';
 
 // 根據 Tab 5 的 priorityGrid 自動計算老師時段結論 (例如 W1 08:00-12:00 / W2 14:00-15:00)
 export const generatePriorityConclusion = (teacherId: string, grid: Record<string, any>) => {
@@ -45,13 +49,6 @@ export const generatePriorityConclusion = (teacherId: string, grid: Record<strin
   return conclusions.length > 0 ? conclusions.join(' / ') : '無固定優先時段';
 };
 
-const getMonthFromDate = (dateStr: string) => {
-  if (!dateStr) return '';
-  const parts = dateStr.split('-');
-  if (parts.length >= 2) return `${parseInt(parts[1], 10)}月`;
-  return '';
-};
-
 // ==========================================
 // 1. 第一層：老師管理主頁 (全館統計 / 清單)
 // ==========================================
@@ -61,13 +58,17 @@ export default function Tab4TeachersManagement({
   teachers, 
   setTeachers, 
   bookings, 
+  systemBaseDate,
   priorityGrid,
   onSelectTeacher, 
   showToast,
   isAddTeacherOpen,
   setIsAddTeacherOpen
 }: any) {
-  const [selectedMonth, setSelectedMonth] = useState('10月');
+  const monthKeys = useMemo(() => deriveMonthKeys(bookings, systemBaseDate), [bookings, systemBaseDate]);
+  const currentMonthKey = monthKeys.includes(monthKeyOf(systemBaseDate)) ? monthKeyOf(systemBaseDate) : monthKeys[0];
+  const [pickedMonth, setSelectedMonth] = useState<string | null>(null);
+  const selectedMonth = pickedMonth && monthKeys.includes(pickedMonth) ? pickedMonth : currentMonthKey;
   const [accordionOpen, setAccordionOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [colorPickerTarget, setColorPickerTarget] = useState<string | null>(null);
@@ -88,46 +89,29 @@ export default function Tab4TeachersManagement({
     return set;
   }, [teachers]);
 
-  // 模擬歷史統計資料
-  const mockHistoryStats = [
-    { month: '10月', v1: 12, v2: 10, total: 22, penalty: 1, normal: 2 },
-    { month: '9月', v1: 14, v2: 8, total: 22, penalty: 0, normal: 1 },
-    { month: '8月', v1: 10, v2: 12, total: 22, penalty: 1, normal: 0 },
-    { month: '7月', v1: 15, v2: 10, total: 25, penalty: 0, normal: 2 },
-    { month: '6月', v1: 12, v2: 12, total: 24, penalty: 2, normal: 1 },
-    { month: '5月', v1: 14, v2: 10, total: 24, penalty: 0, normal: 0 },
-    { month: '4月', v1: 10, v2: 15, total: 25, penalty: 0, normal: 1 },
-  ];
-
   // 依照選擇的月份動態過濾 bookings
   const filteredBookings = bookings.filter((b: any) => {
     const isTarget = userRole === 'admin' || b.teacherId === currentUserId;
-    return isTarget && getMonthFromDate(b.date) === selectedMonth;
+    return isTarget && monthKeyOf(b.date) === selectedMonth;
   });
 
-  const getTeacherStats = (tId: string) => {
-    const list = filteredBookings.filter((b: any) => b.teacherId === tId);
-    const count1v1 = list.filter((b: any) => b.lessonType === '1v1' && b.status === 'confirmed').length;
-    const count1v2 = list.filter((b: any) => b.lessonType === '1v2' && b.status === 'confirmed').length;
-    const total = count1v1 + count1v2;
-    const normalCancel = list.filter((b: any) => b.status === 'cancelled_normal').length;
-    const penalty = list.filter((b: any) => b.status === 'special_rejected').length;
-    return { count1v1, count1v2, total, normalCancel, penalty };
-  };
+  // 老師與管理員共用同一個統計口徑（bookingRules.getTeacherStats）
+  const getTeacherStats = (tId: string, monthKey: string = selectedMonth) =>
+    computeTeacherStats(bookings, monthKey, tId);
 
   const activeTeachers = Object.values(teachers).filter((t: any) => t.isActive);
   const archivedTeachers = Object.values(teachers).filter((t: any) => !t.isActive);
 
   // 儲存新增老師
   const handleSaveTeacher = () => {
-    if (!newTeacherName.trim()) return alert('請輸入老師姓名');
+    if (!newTeacherName.trim()) return systemAlert('請輸入老師姓名');
     const selectedColor = PRESET_COLORS[newTeacherColorIndex] || PRESET_COLORS[0];
     
     if (usedColorsSet.has(selectedColor.color)) {
-      return alert('該代表色已被其他活躍老師使用，請挑選其他顏色以利課表辨識！');
+      return systemAlert('該代表色已被其他活躍老師使用，請挑選其他顏色以利課表辨識！');
     }
 
-    const newId = `t-${Date.now()}`;
+    const newId = genId('t');
     const newTeacherProfile = {
       id: newId,
       name: newTeacherName,
@@ -168,12 +152,10 @@ export default function Tab4TeachersManagement({
               onChange={e => setSelectedMonth(e.target.value)}
               className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 font-bold outline-none focus:ring-1 focus:ring-rose-400 transition shadow-2xs"
             >
-              <option value="10月">2026 年 10 月</option>
-              <option value="9月">2026 年 09 月</option>
-              <option value="8月">2026 年 08 月</option>
+              {monthKeys.map(k => <option key={k} value={k}>{formatMonthKey(k)}</option>)}
             </select>
           </div>
-          <button onClick={() => showToast(`已匯出 ${selectedMonth} 統計表 CSV`)} className="text-xs bg-slate-800 hover:bg-slate-700 transition text-white px-3 py-1.5 rounded-xl font-bold shadow-xs flex items-center gap-1">
+          <button onClick={() => showToast(`已匯出 ${formatMonthKey(selectedMonth)} 統計表 CSV`)} className="text-xs bg-slate-800 hover:bg-slate-700 transition text-white px-3 py-1.5 rounded-xl font-bold shadow-xs flex items-center gap-1">
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" /> 匯出
           </button>
         </div>
@@ -214,22 +196,25 @@ export default function Tab4TeachersManagement({
                   })}
                 </>
               ) : (
-                mockHistoryStats.slice(0, expandStats ? mockHistoryStats.length : 5).map((s, idx) => (
-                  <tr key={idx} className={s.month === selectedMonth ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
-                    <td className="py-2.5 px-1 text-left font-bold font-sans text-slate-900">
-                      {s.month} {s.month === '10月' ? '(當月)' : ''}
-                    </td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.v1}</td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.v2}</td>
-                    <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.penalty}</td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.normal}</td>
-                  </tr>
-                ))
+                monthKeys.slice(0, expandStats ? monthKeys.length : 5).map(k => {
+                  const s = getTeacherStats(currentUserId, k);
+                  return (
+                    <tr key={k} className={k === selectedMonth ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
+                      <td className="py-2.5 px-1 text-left font-bold font-sans text-slate-900">
+                        {formatMonthKey(k)} {k === currentMonthKey ? '(當月)' : ''}
+                      </td>
+                      <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
+                      <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
+                      <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
+                      <td className="py-2.5 px-1 text-slate-700">{s.penalty}</td>
+                      <td className="py-2.5 px-1 text-slate-700">{s.normalCancel}</td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
-          {userRole !== 'admin' && mockHistoryStats.length > 5 && (
+          {userRole !== 'admin' && monthKeys.length > 5 && (
             <button onClick={() => setExpandStats(!expandStats)} className="w-full text-center py-2 text-slate-400 hover:text-slate-600 font-bold text-[11px] mt-1 transition">
               {expandStats ? '收合紀錄 ▲' : '展開更早紀錄 ▼'}
             </button>
@@ -240,7 +225,7 @@ export default function Tab4TeachersManagement({
       {/* 流水帳明細 (標題連動月份、取消狀態完整補全) */}
       <div className="bg-white rounded-3xl border border-slate-200 shadow-2xs overflow-hidden">
         <button onClick={() => setAccordionOpen(!accordionOpen)} className="w-full p-4 flex justify-between items-center text-xs font-bold text-slate-700 bg-slate-50 hover:bg-slate-100 transition">
-          <span className="flex items-center gap-1.5">📁 {selectedMonth}明細</span>
+          <span className="flex items-center gap-1.5">📁 {formatMonthKey(selectedMonth)} 明細</span>
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-400 font-mono">{filteredBookings.length} 筆</span>
             <ChevronDown className={`w-4 h-4 transition-transform ${accordionOpen ? 'rotate-180' : ''}`} />
@@ -265,32 +250,8 @@ export default function Tab4TeachersManagement({
                     </span>
                   </div>
                   
-                  {/* 精確狀態標籤 (涵蓋所有取消與完成類型) */}
-                  {b.signed ? (
-                    <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">
-                      簽到完成
-                    </span>
-                  ) : b.status === 'cancelled_normal' ? (
-                    <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold shadow-2xs">
-                      正常取消
-                    </span>
-                  ) : b.status === 'special_rejected' ? (
-                    <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">
-                      計罰取消
-                    </span>
-                  ) : b.status === 'special_approved' ? (
-                    <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">
-                      免罰取消
-                    </span>
-                  ) : b.status === 'special_pending' ? (
-                    <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">
-                      取消待審核
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full shadow-2xs">
-                      尚未開始
-                    </span>
-                  )}
+                  {/* 精確狀態標籤：全站統一由 BookingStatusBadge 渲染 */}
+                  <BookingStatusBadge booking={b} showUpcoming />
                 </div>
               );
             })}
@@ -446,7 +407,7 @@ export default function Tab4TeachersManagement({
       {/* 新增老師 Modal (代表色互斥防撞色) */}
       {isAddTeacherOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95">
+          <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95">
             <div className="flex justify-between items-center border-b border-slate-100 pb-2">
               <h3 className="text-sm font-black text-slate-800 flex items-center gap-1.5">
                 <UserPlus className="w-4 h-4 text-rose-500" /> 新增老師帳號
@@ -556,7 +517,7 @@ export default function Tab4TeachersManagement({
 // ==========================================
 // 2. 第二層：老師檔案內頁 (優先排課時段移至此處資訊欄完整呈現)
 // ==========================================
-export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGrid, showToast }: any) {
+export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGrid, showToast, bookings = [], systemBaseDate }: any) {
   const [email, setEmail] = useState(teacher.email);
   const [phone, setPhone] = useState(teacher.phone);
   const [isEditingInfo, setIsEditingInfo] = useState(false);
@@ -567,14 +528,12 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
     return generatePriorityConclusion(teacher.id, priorityGrid);
   }, [teacher.id, priorityGrid]);
 
-  const mockHistoryStats = [
-    { month: '10月 (當月)', v1: 12, v2: 10, total: 22, penalty: 1, normal: 2 },
-    { month: '9月', v1: 14, v2: 8, total: 22, penalty: 0, normal: 1 },
-    { month: '8月', v1: 10, v2: 12, total: 22, penalty: 1, normal: 0 },
-    { month: '7月', v1: 15, v2: 10, total: 25, penalty: 0, normal: 2 },
-    { month: '6月', v1: 12, v2: 12, total: 24, penalty: 2, normal: 1 },
-    { month: '5月', v1: 14, v2: 10, total: 24, penalty: 0, normal: 0 },
-  ];
+  const monthKeys = useMemo(() => deriveMonthKeys(bookings, systemBaseDate), [bookings, systemBaseDate]);
+  const currentMonthKey = monthKeyOf(systemBaseDate);
+  const historyStats = useMemo(() => monthKeys.map(k => {
+    const st = computeTeacherStats(bookings, k, teacher.id);
+    return { month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, penalty: st.penalty, normal: st.normalCancel };
+  }), [bookings, monthKeys, teacher.id, currentMonthKey]);
 
   return (
     <div className="space-y-4 animate-in fade-in slide-in-from-right-4 pb-20">
@@ -642,7 +601,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
-            {mockHistoryStats.slice(0, expandStats ? mockHistoryStats.length : 5).map((s, idx) => (
+            {historyStats.slice(0, expandStats ? historyStats.length : 5).map((s, idx) => (
               <tr key={idx} className={idx === 0 ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
                 <td className="py-2.5 text-left font-bold font-sans text-slate-900">{s.month}</td>
                 <td className="py-2.5">{s.v1}</td>
@@ -654,7 +613,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
             ))}
           </tbody>
         </table>
-        {mockHistoryStats.length > 5 && (
+        {historyStats.length > 5 && (
           <button onClick={() => setExpandStats(!expandStats)} className="w-full text-center py-2 text-slate-400 hover:text-slate-600 font-bold text-[11px] transition mt-1 bg-white border border-slate-100 rounded-xl shadow-2xs">
             {expandStats ? '收合紀錄 ▲' : '展開更早紀錄 ▼'}
           </button>

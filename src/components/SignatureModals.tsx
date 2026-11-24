@@ -31,17 +31,13 @@ export function CanvasPad({
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-
-    if ('touches' in e) {
-      const touch = e.touches[0];
-      return {
-        x: touch.clientX - rect.left,
-        y: touch.clientY - rect.top,
-      };
-    }
+    // 畫布內部解析度與 CSS 顯示尺寸不同時（手機寬度），需換算座標
+    const scaleX = rect.width ? canvas.width / rect.width : 1;
+    const scaleY = rect.height ? canvas.height / rect.height : 1;
+    const point = 'touches' in e ? e.touches[0] : (e as React.MouseEvent);
     return {
-      x: (e as React.MouseEvent).clientX - rect.left,
-      y: (e as React.MouseEvent).clientY - rect.top,
+      x: (point.clientX - rect.left) * scaleX,
+      y: (point.clientY - rect.top) * scaleY,
     };
   };
 
@@ -114,7 +110,7 @@ export function CanvasPad({
         )}
       </div>
 
-      <div className="flex items-center justify-between gap-2 pt-1">
+      <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
         <button
           type="button"
           onClick={handleClear}
@@ -134,7 +130,8 @@ export function CanvasPad({
           <button
             type="button"
             onClick={handleConfirm}
-            className="px-4 py-1.5 text-xs bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-bold flex items-center gap-1 shadow-sm transition active:scale-95"
+            disabled={!hasDrawn}
+            className="px-4 py-1.5 text-xs bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-bold flex items-center gap-1 shadow-sm transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-rose-500 disabled:active:scale-100 whitespace-nowrap"
           >
             <Check className="w-3.5 h-3.5" /> 確認簽名
           </button>
@@ -149,9 +146,11 @@ export function CanvasPad({
 interface BookingStatusBadgeProps {
   booking: any;
   onZoomSignature?: (data: { url: string; time: string }) => void;
+  /** 有效但尚未簽到的課堂是否顯示「尚未開始」（明細列表用） */
+  showUpcoming?: boolean;
 }
 
-export function BookingStatusBadge({ booking: b, onZoomSignature }: BookingStatusBadgeProps) {
+export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }: BookingStatusBadgeProps) {
   if (!b) return null;
     return (
     <div className="flex items-center gap-1.5 flex-wrap">
@@ -178,6 +177,26 @@ export function BookingStatusBadge({ booking: b, onZoomSignature }: BookingStatu
         <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300 font-black px-1.5 py-0.5 rounded shadow-2xs">
           已簽到
         </span>
+      ) : b.status === 'cancelled_normal' ? (
+        /* 5. 取消類 */
+        b.cancelReason === 'after_hours_rejected' ? (
+          <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非營業時間駁回</span>
+        ) : (
+          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold shadow-2xs">正常取消</span>
+        )
+      ) : b.status === 'special_rejected' ? (
+        <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">計罰取消</span>
+      ) : b.status === 'special_approved' ? (
+        <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">免罰取消</span>
+      ) : b.status === 'special_pending' ? (
+        /* 6. 待審核：區分非營業時間 / 24H 內異動 */
+        b.pendingKind === 'after_hours' ? (
+          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">非營業時間待審</span>
+        ) : (
+          <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">24H內異動待審</span>
+        )
+      ) : showUpcoming ? (
+        <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full shadow-2xs">尚未開始</span>
       ) : null}
 
       {/* 簽名筆跡縮圖 (僅在有手寫筆跡且傳入縮放 callback 時呈現) */}
@@ -233,7 +252,7 @@ export function CanvasPadModal({
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-      <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 animate-in zoom-in-95">
+      <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 animate-in zoom-in-95">
         <div className="flex justify-between items-center border-b pb-2">
           <h3 className="font-black text-slate-800 text-sm flex items-center gap-1.5">
             <PenTool className="w-4 h-4 text-rose-500" /> 手寫簽名 ({studentDisplayName})
@@ -276,7 +295,7 @@ export function SignatureZoomModal({ zoomedSignature, onClose }: any) {
       onClick={onClose}
     >
       <div
-        className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl text-center border animate-in zoom-in-95"
+        className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl text-center border animate-in zoom-in-95"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="text-xs font-black text-slate-800 mb-3">簽名存根檢視</h3>

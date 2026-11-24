@@ -1,145 +1,22 @@
-// ==========================================
-// 1. 型別定義 (Types & Interfaces)
-// ==========================================
+import { genId } from './utils/id';
+import type {
+  TeacherProfile, PresetColor, StudentRule, PurchaseRecord, StudentItem,
+  BookingItem, ReviewItem, AuditLogItem, ConflictCheckResult, ScheduleEngineResult,
+  BusinessHoursConfig,
+} from './types';
+export * from './types';
+import { checkGlobalConflict, isCancelledSlot } from './utils/conflict';
+import {
+  DEFAULT_BUSINESS_HOURS,
+  diffDays,
+  findOtherPriorityOwner,
+  isWithinBusinessHours,
+  matchesStudent,
+  occupiesQuota,
+} from './utils/bookingRules';
+import type { PriorityGrid } from './utils/bookingRules';
+export { checkGlobalConflict, isCancelledSlot };
 
-export interface TeacherProfile {
-  id: string;
-  name: string;
-  phone: string;
-  email?: string;       // 支援可選 email
-  color: string;
-  bgLight: string;
-  border?: string;      // 支援可選 border
-  text: string;
-  isActive: boolean;
-  notes?: string;
-  monthlyQuota?: number;
-}
-export interface PresetColor {
-  id: string;
-  name: string;
-  label: string;
-  color: string;
-  bgLight: string;
-  text: string;
-  border: string;
-}
-export interface StudentRule {
-  id: string;
-  freq: '每週' | '隔週' | '不固定' | 'W' | 'EOW';
-  day: '一' | '二' | '三' | '四' | '五' | '六' | '日';
-  time: string;
-  startDate: string;
-  lessonType?: '1v1' | '1v2';
-  roomType?: 'large' | 'small';
-}
-
-export interface PurchaseRecord {
-  id: string;
-  date: string;
-  credits: number;
-  price: number;
-  teacherName: string;
-  studentName: string;
-  studentSign?: string;
-  signedAt?: string;
-}
-
-export interface StudentItem {
-  id: string;
-  name: string;
-  phone: string;
-  teacherId: string;
-  note?: string;
-  credits: number;
-  defaultLessonType?: '1v1' | '1v2';
-  lessonType?: '1v1' | '1v2';
-  isTrial?: boolean;
-  noRegularRule?: boolean;
-  rules: StudentRule[];
-  status: 'active' | 'archived';
-  nextLesson?: string;
-  purchases?: PurchaseRecord[];
-}
-
-export interface BookingItem {
-  id: string;
-  date: string;
-  startHour: number;
-  startMin: number;
-  durationMins: number;
-  teacherId: string;
-  studentName: string;
-  studentId: string;
-  roomType: 'large' | 'small';
-  lessonType: '1v1' | '1v2';
-  status: 'confirmed' | 'cancelled_normal' | 'special_pending' | 'special_approved' | 'special_rejected';
-  signed: boolean;
-  signatureData?: string;
-  signedAt?: string;
-  teacherNote?: string;
-}
-
-export interface ReviewItem {
-  id: string;
-  bookingId?: string;
-  teacherId: string;
-  teacherName: string;
-  studentName?: string;
-  date: string;
-  time: string;
-  room: string;
-  lessonType?: string;
-  reason: string;
-  status: 'pending' | 'approved' | 'rejected';
-  phone?: string;
-  reviewType?: 'cancel' | 'reschedule' | 'room_change';
-  reqDate?: string;
-  reqHour?: number;
-  reqMin?: number;
-  reqRoom?: 'large' | 'small';
-  reqLessonType?: '1v1' | '1v2';
-}
-
-export interface AuditLogItem {
-  id: string;
-  time: string;
-  actor: string;
-  teacherName?: string;
-  studentName: string;
-  action: string;
-  detail?: string;
-  summary?: string;
-  typeStr: '簽到' | '預約' | '調度' | '改室' | '改期' | '取消' | '購課' | string;
-  category: 'red' | 'yellow' | 'normal';
-  read: boolean;
-  teacherId?: string;
-  reviewId?: string;
-  remainingCredits?: number;
-}
-
-// 衝突檢測回傳結構 (支援角色隱私遮罩與換室建議)
-export interface ConflictCheckResult {
-  hasConflict: boolean;
-  reason?: string;
-  suggestAlternateRoom?: 'large' | 'small';
-  alternateRoomReason?: string;
-}
-
-export interface ScheduleEngineResult {
-  success: boolean;
-  message: string;
-  copyText: string;
-  newRecords: BookingItem[];
-  removedBookingIds: string[];
-  skippedReasons: string[];
-  suggestedRoomSwaps?: {
-    date: string;
-    time: string;
-    targetRoom: 'large' | 'small';
-    reason: string;
-  }[];
-}
 // ==========================================
 // 2. 輔助函式 (Helper Functions)
 // ==========================================
@@ -194,121 +71,6 @@ export const formatLocalDate = (d: Date): string => {
   return `${y}-${m}-${day}`;
 };
 
-// 判定是否為已取消釋出的課堂（一般取消、免罰取消、計罰取消皆已釋出空間）
-export const isCancelledSlot = (status: string) => {
-  return status === 'cancelled_normal' || status === 'special_approved' || status === 'special_rejected';
-};
-
-// 全域衝堂防呆檢測引擎（含角色權限隱私遮罩與換室建議）
-export const checkGlobalConflict = ({
-  dateStr,
-  startHour,
-  startMin,
-  durationMins = 50,
-  roomType,
-  lessonType = '1v1',
-  teacherId,
-  studentId,
-  studentName,
-  userRole = 'teacher',
-  existingBookings,
-  teachersMap,
-  studentsMap,
-  excludeBookingId
-}: {
-  dateStr: string;
-  startHour: number;
-  startMin: number;
-  durationMins?: number;
-  roomType: 'large' | 'small';
-  lessonType?: '1v1' | '1v2';
-  teacherId: string;
-  studentId?: string;
-  studentName?: string;
-  userRole?: 'admin' | 'teacher';
-  existingBookings: BookingItem[];
-  teachersMap: Record<string, TeacherProfile>;
-  studentsMap: Record<string, StudentItem>;
-  excludeBookingId?: string;
-}): ConflictCheckResult => {
-  const reqStart = startHour * 60 + startMin;
-  const reqEnd = reqStart + durationMins;
-
-  // 1. 檢查同教室是否有預約佔用
-  for (const b of existingBookings) {
-    if (isCancelledSlot(b.status)) continue; // 已取消的課堂空間全空，不計入衝堂
-    if (excludeBookingId && b.id === excludeBookingId) continue;
-    if (b.date !== dateStr) continue;
-
-    const bStart = b.startHour * 60 + b.startMin;
-    const bEnd = bStart + (b.durationMins || 50);
-
-    const isOverlapping = !(reqEnd <= bStart || reqStart >= bEnd);
-    if (!isOverlapping) continue;
-
-    const tObj = teachersMap[b.teacherId];
-    const teacherLabel = tObj?.name || '老師';
-    const studentLabel = b.studentName || '學員';
-    const roomLabel = b.roomType === 'large' ? '大教室' : '小教室';
-    const timeRangeStr = `${formatTimeStr(b.startHour, b.startMin)} ~ ${formatTimeStr(Math.floor(bEnd / 60), bEnd % 60)}`;
-
-    // 教室空間衝突
-    if (b.roomType === roomType) {
-      // 檢查另一間教室是否為空（狀況 E 換室建議）
-      const otherRoom: 'large' | 'small' = roomType === 'large' ? 'small' : 'large';
-      const isOtherRoomFree = !existingBookings.some(ob => {
-        if (isCancelledSlot(ob.status)) return false;
-        if (excludeBookingId && ob.id === excludeBookingId) return false;
-        if (ob.date !== dateStr || ob.roomType !== otherRoom) return false;
-        const obStart = ob.startHour * 60 + ob.startMin;
-        const obEnd = obStart + (ob.durationMins || 50);
-        return !(reqEnd <= obStart || reqStart >= obEnd);
-      });
-
-      // 1v2 課程絕對不能排入小教室
-      const canSuggestSwap = isOtherRoomFree && !(lessonType === '1v2' && otherRoom === 'small');
-
-      // 依照身分提供遮罩訊息
-      const reasonMsg = userRole === 'admin'
-        ? `衝堂提醒：${roomLabel}（${timeRangeStr}）${teacherLabel} 老師 ${studentLabel} ${b.lessonType}`
-        : b.teacherId === teacherId
-          ? `衝堂提醒：您在該時段已有預約（${roomLabel} ${timeRangeStr} ${studentLabel} ${b.lessonType}）`
-          : `衝堂提醒：${roomLabel}（${timeRangeStr}）${b.lessonType} 已有預約`;
-
-      return {
-        hasConflict: true,
-        reason: reasonMsg,
-        suggestAlternateRoom: canSuggestSwap ? otherRoom : undefined,
-        alternateRoomReason: canSuggestSwap 
-          ? `${dateStr} ${timeRangeStr} ${roomLabel}已有預約，${otherRoom === 'large' ? '大教室' : '小教室'}尚有空檔，是否改排？` 
-          : undefined
-      };
-    }
-
-    // 老師分身衝堂
-    if (b.teacherId === teacherId) {
-      return {
-        hasConflict: true,
-        reason: userRole === 'admin'
-          ? `衝堂提醒：${teacherLabel} 老師在該時段已在${roomLabel}授課 (${studentLabel})`
-          : `衝堂提醒：您在該時段已在${roomLabel}有排課`
-      };
-    }
-
-    // 學員分身衝堂
-    const isSameStudent = (studentId && b.studentId === studentId) || (studentName && b.studentName === studentName);
-    if (isSameStudent) {
-      return {
-        hasConflict: true,
-        reason: userRole === 'admin'
-          ? `衝堂提醒：學員 ${studentLabel} 在該時段已在${roomLabel}預約了其他課堂`
-          : `衝堂提醒：學員 ${studentLabel} 在該時段已有其他預約`
-      };
-    }
-  }
-
-  return { hasConflict: false };
-};
 
 // ==========================================
 // 3. 自動排課引擎 (Schedule Engine)
@@ -334,6 +96,33 @@ export class ScheduleEngine {
   }
 
   /**
+   * 自動排課共用的跳過判斷：回傳原因字串；可排則回傳 null。
+   */
+  private getSlotSkipReason({
+    dateStr, h, m, teacherId, userRole, todayStr, businessHours, priorityGrid, roomType,
+  }: {
+    dateStr: string;
+    h: number;
+    m: number;
+    teacherId: string;
+    userRole: 'admin' | 'teacher';
+    todayStr: string;
+    businessHours: BusinessHoursConfig;
+    priorityGrid: PriorityGrid;
+    roomType: 'large' | 'small';
+  }): string | null {
+    if (!isWithinBusinessHours(dateStr, h, m, businessHours, 50)) return '公休或非營業時間';
+    if (userRole !== 'admin') {
+      const ahead = diffDays(dateStr, todayStr);
+      if (ahead > 90) return '超過 90 天預約上限';
+      if (ahead > 14 && findOtherPriorityOwner({ dateStr, startHour: h, startMin: m, roomType, teacherId, priorityGrid })) {
+        return '他人優先時段';
+      }
+    }
+    return null;
+  }
+
+  /**
    * 核心自動預排函式
    */
   public generateSchedule({
@@ -343,6 +132,9 @@ export class ScheduleEngine {
     credits,
     slots,
     startFromDate,
+    todayStr,
+    businessHours = DEFAULT_BUSINESS_HOURS,
+    priorityGrid = {},
     userRole = 'teacher',
     mode = 'replace_future', // 'append_remaining' (接續排課) 或 'replace_future' (重整未來)
     maxWeeksLimit = 16
@@ -353,12 +145,15 @@ export class ScheduleEngine {
     credits: number;
     slots: StudentRule[];
     startFromDate: string;
+    /** 全局基準日 systemBaseDate */
+    todayStr: string;
+    businessHours?: BusinessHoursConfig;
+    priorityGrid?: PriorityGrid;
     userRole?: 'admin' | 'teacher';
     mode?: 'append_remaining' | 'replace_future';
     maxWeeksLimit?: number;
   }): ScheduleEngineResult {
-    // 1. 底線防護：嚴禁預排過去日期（基準日若小於今天，強制校正為今天）
-    const todayStr = '2026-10-24'; // 系統當前基準日
+    // 1. 底線防護：嚴禁預排過去日期（起始日若早於基準日，強制校正為基準日）
     const effectiveStartDate = startFromDate < todayStr ? todayStr : startFromDate;
 
     if (credits <= 0) {
@@ -386,24 +181,25 @@ export class ScheduleEngine {
 
     // 2. 嚴格不可篡改保護區 (防洗單鐵律)：
     // 只有「>= effectiveStartDate、未簽到、且狀態為純 confirmed」的未來預約才允許被清除重排！
-    // 任何歷史紀錄、簽到扣堂、已取消（計罰/免罰）、審核中的課堂，絕對不可刪除！
-    const safeFutureBookings = this.bookings.filter(b => 
-      (b.studentId === sid || b.studentName === sName) &&
+    // 任何歷史紀錄、簽到扣堂、已取消（計罰/免罰）、審核中（special_pending）的課堂，絕對不可刪除！
+    const isSameStudent = (b: BookingItem) => matchesStudent({ id: sid, name: sName }, b.studentId, b.studentName);
+    const safeFutureBookings = this.bookings.filter(b =>
+      isSameStudent(b) &&
       b.date >= effectiveStartDate &&
       !b.signed &&
       b.status === 'confirmed'
     );
 
     let removedBookingIds: string[] = [];
-    let preservedFutureCount = 0;
-
     if (mode === 'replace_future') {
-      // 重整未來：釋出未來的純預約
+      // 重整未來：僅釋出未來的純 confirmed 預約（special_pending 受保護）
       removedBookingIds = safeFutureBookings.map(b => b.id);
-    } else {
-      // 接續排課：保留未來的純預約
-      preservedFutureCount = safeFutureBookings.length;
     }
+
+    // 已佔用額度：以 occupiesQuota 統一計算（含 special_pending 與逾期未簽），扣除即將被移除者
+    const preservedFutureCount = this.bookings.filter(
+      b => isSameStudent(b) && occupiesQuota(b) && !removedBookingIds.includes(b.id)
+    ).length;
 
     // 計算本次實際能新增預排的堂數上限（總堂數永不溢出）
     let remainingToSchedule = credits - preservedFutureCount;
@@ -424,11 +220,15 @@ export class ScheduleEngine {
     const newRecords: BookingItem[] = [];
     const skippedReasons: string[] = [];
     const suggestedRoomSwaps: any[] = [];
+    let hitHorizonLimit = false;
 
     let currentCursor = parseLocalDate(effectiveStartDate);
     let weeksCount = 0;
 
-    while (remainingToSchedule > 0 && weeksCount < maxWeeksLimit) {
+    // 管理員不受 16 週／90 天限制（安全上限 104 週 = 2 年）；一般老師受 90 天規則限制
+    const effectiveMaxWeeks = userRole === 'admin' ? Math.max(maxWeeksLimit, 104) : maxWeeksLimit;
+
+    while (remainingToSchedule > 0 && weeksCount < effectiveMaxWeeks) {
       weeksCount++;
       for (const slot of validSlots) {
         if (remainingToSchedule <= 0) break;
@@ -460,6 +260,21 @@ export class ScheduleEngine {
         const lType = slot.lessonType || '1v1';
         let rType = slot.roomType || (lType === '1v2' ? 'large' : 'small');
 
+        // 3.5 自動跳過：公休/非營業時間、超過 90 天、他人優先時段（管理員不受 90 天與優先時段限制）
+        const skipReason = this.getSlotSkipReason({
+          dateStr, h, m, teacherId, userRole, todayStr, businessHours, priorityGrid, roomType: rType,
+        });
+        if (skipReason) {
+          if (skipReason.startsWith('超過 90 天')) {
+            // 日期只會越來越晚，之後的時段一律超限，直接結束排課
+            hitHorizonLimit = true;
+            skippedReasons.push(`${formatDateWithDay(dateStr)} ${slot.time} (${skipReason})`);
+            break;
+          }
+          skippedReasons.push(`${formatDateWithDay(dateStr)} ${slot.time} (${skipReason})`);
+          continue;
+        }
+
         // 4. 狀況 E 檢驗：被取消的時段已完全釋出，可正常預排
         const conflict = checkGlobalConflict({
           dateStr,
@@ -479,7 +294,7 @@ export class ScheduleEngine {
 
         if (!conflict.hasConflict) {
           newRecords.push({
-            id: `b-auto-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+            id: genId('b-auto'),
             date: dateStr,
             startHour: h,
             startMin: m,
@@ -490,22 +305,43 @@ export class ScheduleEngine {
             roomType: rType,
             lessonType: lType,
             status: 'confirmed',
-            signed: false
+            signed: false,
+            isAuto: true
           });
           remainingToSchedule--;
         } else {
-          // 若衝堂但另一間教室有空（且符合 1v1 換室條件）
+          // 若衝堂但另一間教室有空（且符合 1v1 換室條件）：直接改排至另一間教室
           if (conflict.suggestAlternateRoom && lType === '1v1') {
-            suggestedRoomSwaps.push({
-              date: dateStr,
-              time: slot.time,
-              targetRoom: conflict.suggestAlternateRoom,
-              reason: conflict.alternateRoomReason || ''
+            const altRoom = conflict.suggestAlternateRoom;
+            const altConflict = checkGlobalConflict({
+              dateStr, startHour: h, startMin: m, durationMins: 50,
+              roomType: altRoom, lessonType: lType, teacherId,
+              studentId: sid, studentName: sName, userRole,
+              existingBookings: [...activeBookings, ...newRecords],
+              teachersMap: this.teachersMap, studentsMap: this.studentsMap
             });
+            if (!altConflict.hasConflict) {
+              newRecords.push({
+                id: genId('b-auto'),
+                date: dateStr, startHour: h, startMin: m, durationMins: 50,
+                teacherId, studentName: sName, studentId: sid,
+                roomType: altRoom, lessonType: lType,
+                status: 'confirmed', signed: false, isAuto: true
+              });
+              remainingToSchedule--;
+              suggestedRoomSwaps.push({
+                date: dateStr,
+                time: slot.time,
+                targetRoom: altRoom,
+                reason: `${rType === 'large' ? '大教室' : '小教室'}已有預約，已自動改排至${altRoom === 'large' ? '大教室' : '小教室'}`
+              });
+              continue;
+            }
           }
           skippedReasons.push(`${formatDateWithDay(dateStr)} ${slot.time} (${conflict.reason})`);
         }
       }
+      if (hitHorizonLimit) break;
       currentCursor.setDate(currentCursor.getDate() + 7);
     }
 
@@ -524,7 +360,10 @@ export class ScheduleEngine {
 
     return {
       success: true,
-      message: `已順利預排 ${newRecords.length} 堂課${skippedReasons.length > 0 ? ` (自動避開 ${skippedReasons.length} 處衝堂)` : ''}`,
+      scheduledCount: newRecords.length,
+      remainingUnscheduled: remainingToSchedule,
+      hitHorizonLimit,
+      message: `已順利預排 ${newRecords.length} 堂課${skippedReasons.length > 0 ? ` (自動略過 ${skippedReasons.length} 處不可排時段)` : ''}`,
       copyText,
       newRecords,
       removedBookingIds,
@@ -534,71 +373,86 @@ export class ScheduleEngine {
   }
 
   /**
-   * 狀況 C：已排滿時手動新增一堂，自動刪除時間最後的一堂純預約
+   * 狀況 C：已排滿時手動新增一堂，僅能刪除「confirmed、未簽、isAuto === true」中時間最後的一堂
    */
   public handleDropLastBookingOnManualAdd(sid: string, currentBookings: BookingItem[]): { updatedBookings: BookingItem[]; droppedBooking: BookingItem | null } {
-    const futureConfirmed = currentBookings
-      .filter(b => b.studentId === sid && !b.signed && b.status === 'confirmed')
+    const futureAuto = currentBookings
+      .filter(b => b.studentId === sid && !b.signed && b.status === 'confirmed' && b.isAuto === true)
       .sort((a, b) => {
         if (a.date !== b.date) return a.date.localeCompare(b.date);
         return (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin);
       });
 
-    if (futureConfirmed.length === 0) {
+    if (futureAuto.length === 0) {
       return { updatedBookings: currentBookings, droppedBooking: null };
     }
 
-    const lastBooking = futureConfirmed[futureConfirmed.length - 1];
+    const lastBooking = futureAuto[futureAuto.length - 1];
     const updated = currentBookings.filter(b => b.id !== lastBooking.id);
     return { updatedBookings: updated, droppedBooking: lastBooking };
   }
 
   /**
-   * 狀況 D：學員取消預排，自動順延補排一堂（附帶 3 個月 90 天限制）
+   * 狀況 D：學員取消預排，自動順延補排一堂（附帶 3 個月 90 天限制）。
+   * 呼叫端須先確認取消已生效且額度仍有空位。順延起點不會早於 todayStr（systemBaseDate）。
    */
   public handleAutoPostponeCancelledBooking({
     sid,
     sName,
     teacherId,
     cancelledDate,
+    todayStr,
     slots,
-    currentBookings
+    currentBookings,
+    businessHours = DEFAULT_BUSINESS_HOURS,
+    priorityGrid = {},
+    userRole = 'teacher'
   }: {
     sid: string;
     sName: string;
     teacherId: string;
     cancelledDate: string;
+    todayStr: string;
     slots: StudentRule[];
     currentBookings: BookingItem[];
+    businessHours?: BusinessHoursConfig;
+    priorityGrid?: PriorityGrid;
+    userRole?: 'admin' | 'teacher';
   }): { postponedBooking: BookingItem | null; alertMsg?: string } {
-    const baseDate = parseLocalDate(cancelledDate);
-    const limitDate = new Date(baseDate);
-    limitDate.setDate(limitDate.getDate() + 90); // 3 個月 (90天) 上限
+    const limitDate = parseLocalDate(todayStr);
+    limitDate.setDate(limitDate.getDate() + 90); // 3 個月 (90天) 上限（自基準日起算）
 
-    // 尋找未來的最後一堂預排日作為推算起點
-    const futureConfirmed = currentBookings
-      .filter(b => b.studentId === sid && !b.signed && b.status === 'confirmed')
+    // 尋找未來（>= 基準日）最後一堂佔額度的預排日作為推算起點
+    const futureOccupied = currentBookings
+      .filter(b => matchesStudent({ id: sid, name: sName }, b.studentId, b.studentName) && occupiesQuota(b) && b.date >= todayStr)
       .sort((a, b) => b.date.localeCompare(a.date));
 
-    const searchStartDate = futureConfirmed.length > 0 
-      ? parseLocalDate(futureConfirmed[0].date) 
+    const searchStartDate = futureOccupied.length > 0
+      ? parseLocalDate(futureOccupied[0].date)
       : parseLocalDate(cancelledDate);
     searchStartDate.setDate(searchStartDate.getDate() + 1);
+    // 起點不得早於系統基準日
+    const todayDate = parseLocalDate(todayStr);
+    if (searchStartDate < todayDate) searchStartDate.setTime(todayDate.getTime());
 
-    const validSlot = slots.find(s => s.freq !== '不固定');
-    if (!validSlot) return { postponedBooking: null };
+    const validSlots = slots.filter(s => s.freq !== '不固定');
+    if (validSlots.length === 0) return { postponedBooking: null };
 
     const dayNameToNum: Record<string, number> = { '日': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6 };
     let cursor = new Date(searchStartDate);
 
     while (cursor <= limitDate) {
-      const curDay = cursor.getDay();
-      const targetDay = dayNameToNum[validSlot.day];
-      if (curDay === targetDay) {
-        const dateStr = formatLocalDate(cursor);
-        const [h, m] = validSlot.time.split(':').map(Number);
-        const lType = validSlot.lessonType || '1v1';
-        const rType = validSlot.roomType || (lType === '1v2' ? 'large' : 'small');
+      const dateStr = formatLocalDate(cursor);
+      for (const slot of validSlots) {
+        if (cursor.getDay() !== dayNameToNum[slot.day]) continue;
+        if (slot.startDate && dateStr < slot.startDate) continue;
+        const [h, m] = slot.time.split(':').map(Number);
+        const lType = slot.lessonType || '1v1';
+        const rType = slot.roomType || (lType === '1v2' ? 'large' : 'small');
+
+        if (this.getSlotSkipReason({
+          dateStr, h, m, teacherId, userRole, todayStr, businessHours, priorityGrid, roomType: rType,
+        })) continue;
 
         const conflict = checkGlobalConflict({
           dateStr,
@@ -617,7 +471,7 @@ export class ScheduleEngine {
         if (!conflict.hasConflict) {
           return {
             postponedBooking: {
-              id: `b-auto-postpone-${Date.now()}`,
+              id: genId('b-auto-postpone'),
               date: dateStr,
               startHour: h,
               startMin: m,
@@ -628,7 +482,8 @@ export class ScheduleEngine {
               roomType: rType,
               lessonType: lType,
               status: 'confirmed',
-              signed: false
+              signed: false,
+              isAuto: true
             }
           };
         }
@@ -1184,6 +1039,7 @@ export const INITIAL_BOOKINGS: BookingItem[] = [
     roomType: 'small',
     lessonType: '1v1',
     status: 'special_pending', // 審核中
+    pendingKind: 'late_change',
     signed: false
   },
   {

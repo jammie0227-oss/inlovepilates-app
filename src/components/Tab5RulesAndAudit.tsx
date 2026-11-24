@@ -2,6 +2,7 @@
 import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
+import { calculateFreeCancelQuota, isTaughtBooking } from '../utils/bookingRules';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -9,6 +10,9 @@ export default function Tab5RulesAndAudit({
   teachers, 
   priorityGrid, 
   setPriorityGrid, 
+  businessHours,
+  setBusinessHours,
+  bookings = [],
   reviews, 
   onReview, 
   onReset, 
@@ -61,6 +65,30 @@ export default function Tab5RulesAndAudit({
   }, [displayLogs]);
 
   const pendingReviews = useMemo(() => reviews.filter((r: any) => r.status === 'pending'), [reviews]);
+
+  // 該老師於審核案件所屬月份的：已上堂數 / 免費取消額度 / 已使用次數
+  const getTeacherQuotaInfo = (item: any) => {
+    const month = (item.date || '').slice(0, 7);
+    const completed = (bookings as any[]).filter(b =>
+      b.teacherId === item.teacherId &&
+      (b.date || '').startsWith(month) &&
+      isTaughtBooking(b)
+    ).length;
+    const quota = calculateFreeCancelQuota(completed);
+    const used = (reviews as any[]).filter(r =>
+      r.teacherId === item.teacherId &&
+      r.status === 'approved' &&
+      !r.voided &&
+      (r.reviewType === 'cancel' || r.reviewType === 'reschedule' || !r.reviewType) &&
+      (r.date || '').startsWith(month)
+    ).length;
+    return { completed, quota, used };
+  };
+
+  const updateDayHours = (key: 'weekday' | 'saturday' | 'sunday', patch: any) => {
+    if (userRole !== 'admin' || !setBusinessHours || !businessHours) return;
+    setBusinessHours({ ...businessHours, [key]: { ...businessHours[key], ...patch } });
+  };
 
   const toggleReviewExpand = (id: string) => {
     setExpandedReviews(prev => ({ ...prev, [id]: !prev[id] }));
@@ -159,19 +187,19 @@ export default function Tab5RulesAndAudit({
                             ? 'bg-purple-50 text-purple-700 border border-purple-200' 
                             : 'bg-rose-50 text-rose-700 border border-rose-200'
                         }`}>
-                          {isRoomChange ? '改室' : item.reviewType === 'reschedule' ? '改期' : '取消'}
+                          {isRoomChange ? '改室' : item.reviewType === 'reschedule' ? '改期' : item.reviewType === 'settlement_undo' ? '結算更正' : item.reviewType === 'after_hours' ? '非營業時間' : '取消'}
                         </span>
                         {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-slate-400 ml-0.5" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-0.5" />}
                       </div>
 
                       <div className="flex gap-1.5 shrink-0">
-                        {isRoomChange ? (
+                        {(isRoomChange || item.reviewType === 'after_hours' || item.reviewType === 'settlement_undo') ? (
                           <>
                             <button 
                               onClick={() => onReview(item.id, 'approved')} 
                               className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
                             >
-                              核准
+                              {item.reviewType === 'settlement_undo' ? '核准更正' : '核准'}
                             </button>
                             <button 
                               onClick={() => onReview(item.id, 'rejected')} 
@@ -198,6 +226,18 @@ export default function Tab5RulesAndAudit({
                         )}
                       </div>
                     </div>
+
+                    {/* 免費特殊取消額度輔助資訊（供管理員裁決免罰/計罰參考） */}
+                    {(item.reviewType === 'cancel' || item.reviewType === 'reschedule' || item.reviewType === 'settlement_undo' || item.reviewType === 'after_hours') && (() => {
+                      const q = getTeacherQuotaInfo(item);
+                      return (
+                        <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">本月已上 {q.completed} 堂</span>
+                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">免費取消額度 {q.quota} 次</span>
+                          <span className={`px-1.5 py-0.5 rounded ${q.used >= q.quota ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>已使用 {q.used} 次</span>
+                        </div>
+                      );
+                    })()}
 
                     {/* 展開詳細內容：清楚標註「🟣 大教室 / 🟢 小教室」文字與異動目標 */}
                     {isExpanded ? (
@@ -234,6 +274,21 @@ export default function Tab5RulesAndAudit({
                               <span className="font-mono font-bold">
                                 {formatDateWithDay(item.reqDate)} {formatTimeStr(item.reqHour ?? 0, item.reqMin ?? 0)}
                               </span>
+                            </div>
+                          )}
+
+                          {item.reviewType === 'after_hours' && (
+                            <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
+                              <span className="text-slate-400">類型：</span>
+                              <span className="font-normal text-slate-600">非營業時間預約（核准後生效、駁回則不成立）</span>
+                            </div>
+                          )}
+
+                          {/* 若為結算更正申請，顯示更正事由 */}
+                          {item.reviewType === 'settlement_undo' && item.undoReason && (
+                            <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
+                              <span className="text-slate-400">更正事由：</span>
+                              <span className="font-normal text-slate-600">{item.undoReason}</span>
                             </div>
                           )}
                         </div>
@@ -420,6 +475,60 @@ export default function Tab5RulesAndAudit({
         )}
       </div>
 
+      {/* 工作室營業時間設定 */}
+      {businessHours && (
+        <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-2xs space-y-2.5 text-xs">
+          <div className="flex justify-between items-center">
+            <h3 className="text-sm font-black text-slate-800">🕘 工作室營業時間設定</h3>
+            {userRole !== 'admin' && <span className="text-[10px] text-slate-400 font-bold">唯讀</span>}
+          </div>
+          {([
+            ['weekday', '週一～週五'],
+            ['saturday', '週六'],
+            ['sunday', '週日'],
+          ] as const).map(([key, label]) => {
+            const cfg = businessHours[key];
+            const isAdmin = userRole === 'admin';
+            return (
+              <div key={key} className="flex items-center gap-2 flex-wrap">
+                <label className="flex items-center gap-1.5 w-24 font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={cfg.enabled}
+                    disabled={!isAdmin}
+                    onChange={e => updateDayHours(key, { enabled: e.target.checked })}
+                  />
+                  {label}
+                </label>
+                {cfg.enabled ? (
+                  <div className="flex items-center gap-1 font-mono font-bold text-slate-700">
+                    <select
+                      value={cfg.startHour}
+                      disabled={!isAdmin}
+                      onChange={e => updateDayHours(key, { startHour: Math.min(Number(e.target.value), cfg.endHour - 1) })}
+                      className="border border-slate-200 rounded-lg px-1.5 py-1 bg-slate-50 disabled:opacity-70"
+                    >
+                      {Array.from({ length: 16 }, (_, i) => i + 7).map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                    </select>
+                    <span>–</span>
+                    <select
+                      value={cfg.endHour}
+                      disabled={!isAdmin}
+                      onChange={e => updateDayHours(key, { endHour: Math.max(Number(e.target.value), cfg.startHour + 1) })}
+                      className="border border-slate-200 rounded-lg px-1.5 py-1 bg-slate-50 disabled:opacity-70"
+                    >
+                      {Array.from({ length: 17 }, (_, i) => i + 8).map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                    </select>
+                  </div>
+                ) : (
+                  <span className="text-slate-400 font-bold">公休</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* 3. 優先排課 */}
       <div className="bg-white rounded-3xl border border-slate-200 shadow-2xs overflow-hidden">
         <button
@@ -549,7 +658,7 @@ export default function Tab5RulesAndAudit({
       {/* 指派優先老師彈窗 */}
       {slotModal && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95">
+          <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95">
             <div className="flex justify-between items-center border-b pb-2">
               <h3 className="text-sm font-bold text-slate-800">指派優先時段 ({slotModal})</h3>
               <button onClick={() => setSlotModal(null)} className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400">
