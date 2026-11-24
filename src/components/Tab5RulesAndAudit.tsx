@@ -404,7 +404,7 @@ export default function Tab5RulesAndAudit({
                 >
                   {/* 第一行：時間  類別  老師名  學生名 (無老師與學員贅字) */}
                   <div className="flex justify-between items-center text-[11px] gap-2">
-                    <div className="flex items-center gap-2 truncate flex-1 font-mono">
+                    <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0 flex-1 font-mono">
                       <span className={`w-2 h-2 rounded-full shrink-0 shadow-2xs ${
                         l.category === 'red' ? 'bg-rose-500' : 
                         l.category === 'yellow' ? 'bg-amber-500' : 
@@ -414,9 +414,9 @@ export default function Tab5RulesAndAudit({
                       <span className="font-black text-slate-800 bg-slate-200/60 px-1.5 py-0.5 rounded text-[10px] shrink-0">
                         {l.typeStr}
                       </span>
-                      <span className="font-bold text-slate-700 font-sans truncate">{teacherClean}</span>
+                      <span className="font-bold text-slate-700 font-sans break-words min-w-0">{teacherClean}</span>
                       {studentClean && (
-                        <span className="font-black text-slate-900 font-sans truncate">{studentClean}</span>
+                        <span className="font-black text-slate-900 font-sans break-words min-w-0">{studentClean}</span>
                       )}
                     </div>
 
