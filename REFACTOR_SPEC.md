@@ -18,11 +18,12 @@
   * 全站判定「過去 / 今天 / 未來」與「是否逾期」的唯一時間基準。
 * **課堂狀態 (`status`)**：
   * `'confirmed'`：正常有效預約。
-  * `'cancelled_normal'`：一般提前取消（不扣堂、釋出空位）。
-  * `'special_pending'`：待管理員審核之申請（包含 24H 內異動、非營業時間預約），
-   **審核期間在排班總覽完全釋出空位（不卡時段）**。
-  * `'special_approved'`：管理員核准（釋出空位免罰，或非營業時間預約核准生效）。
-  * `'special_rejected'`：管理員駁回（釋出空位並累積老師計罰，或非營業時間預約駁回不成立）。
+  * `'cancelled_normal'`：一般提前取消（不扣學員堂數、釋出空位與學員額度，並觸發預排自動順延）。
+  * `'special_pending'`：待管理員審核之申請（包含 24H 內取消/改期、非營業時間預約），
+   **審核期間在排班總覽完全釋出教室空位（不卡時段）**。
+  * `'special_approved'`：管理員核准（24H 內取消/改期免罰生效；取消一律不扣學員堂數）。
+  * `'special_rejected'`：管理員駁回（24H 內取消/改期累積老師計罰，學員堂數仍不扣；非營業時間預約駁回不成立）。
+  * 非營業時間 (`after_hours`) 預約核准後狀態轉為 `'confirmed'`；駁回則標記 `after_hours_rejected`，**不計入正常取消**。
 
 ---
 
@@ -36,16 +37,26 @@
   1. **情境 A（1v1 手動選大教室，且大教室空閒）**：
        允許預約成功；但系統標記其具備「可讓位權」，若後續有其他老師預約同時段 `1v2` 大教室且當時小教室有空，系統將**自動把這堂 1v1 移至小教室**並發送調度通知。
   2. **情境 B（1v1 手動選大教室，但大教室已滿）**：以系統為主，自動將該筆預約導回 `small`（小教室）成立，並提示「大教室該時段已滿，系統已自動為您改排至小教室」。
-  3. **情境 C（1v2 手動選小教室）**：若大教室有空，系統強制導回大教室；
-    僅在大教室滿額且無法觸發 1v1 讓位時，才允許暫排小教室並觸發全站紅色警示橫條。
-  4. **情境 D（事後變更教室）**：開課前 24 小時以上允許依上述規則調整；
-      **開課前 24 小時內**禁止一般老師自行變更，須送審由管理員處理。
+  3. **情境 C（事後變更教室）**：開課前 24 小時以上允許依上述規則調整；
+      **開課前 24 小時內**禁止一般老師自行變更，改走下方「24H 內異動分流」。
+* **小教室嚴禁排入 1v2**：`1v2` 一律只能排大教室（手動選小教室者由系統導回大教室）。
+  若大教室 1v1 無法讓位給 1v2（小教室在完整 50 分鐘區間內有衝突，或大教室已是 1v2），則**直接阻擋該筆 1v2 預約**，不暫排小教室、不觸發紅色警示。
 * **大教室智慧讓位 (`canAutoSwap`)**：預約 `1v2` 進大教室時，必須確認小教室在**完整 50 分鐘區間內**皆無衝突，才可將原大教室之 `1v1` 課堂自動移至小教室並同時成立兩筆預約。
+* **24H 內異動分流**（開課前 24 小時內，一般老師）：
+  * **改時段**：先改期生效，並送審由管理員裁決計罰／免罰。
+  * **僅改教室**：不直接生效；建立 `reviewType: 'room_change'` 審核單，**待管理員核准後才更換教室**。
 
 ### 2. 「審核中 (`special_pending`)」完全釋出空位（絕不卡時段）
 * **業務原則**：審核是為了讓管理員裁決計罰或放行，絕不卡住教室資源。
 * 凡是 `status === 'special_pending'`（無論 24H 內取消/改期，或非營業時間申請），在 Tab 1 排班總覽日曆與週曆上一律隱藏，且在 `checkGlobalConflict` 衝堂檢測中**視同空位（不佔用教室空間）**。
-* 僅在 Tab 3 學員預排清單中顯示該筆待審核紀錄並計入學員已佔用額度（防止自動排課溢出）。
+* 於 Tab 3 學員預排清單中仍顯示該筆待審核紀錄，但**學員額度占用依類型區分**：
+  * 「24H 內取消待審 (`special_pending`)」與一般取消相同，**於執行當下立即釋出學員額度並觸發預排自動順延**。
+  * 僅「非營業時間待審 (`after_hours`)」在審核期間佔用學員額度（防止自動排課溢出）。
+
+### 2-1. 取消、計罰與學員堂數規則
+* **審核僅判定老師計罰（計罰／免罰），取消一律不扣學員堂數**。
+* 一般取消與 24H 內取消待審皆於執行當下釋出學員額度並觸發預排自動順延。
+* **月底強制結算**：對仍未處理之課堂，**不扣學員堂數**，寫入 `settlementType: 'unattended_no_credit_deducted'` 標記，並**計罰老師**。
 
 ### 3. 預約時間邊界與優先權防護
 * **非營業時間預約提醒與送審 (`reviewType: 'after_hours'`)**：
@@ -55,7 +66,8 @@
   * **一般老師**：必須在**開課前 1 小時（60 分鐘）**以前新增預約，超過則阻擋。
   * **管理員 Daisy**：在**開課前 10 分鐘**以前皆可新增預約。
 * **提前預約天數上限**：
-  * **一般老師**：最多只能預約未來 **3 個月（90 天）**內的時段，超過則阻擋；管理員無限制。
+  * **一般老師**：最多只能預約未來 **3 個月（90 天）**內的時段，超過則阻擋。
+  * **補排過去日期與突破 90 天排課上限僅限管理員**；一般老師皆不可。
 * **固定老師優先時段 (`priorityGrid`) 兩週保護**：
   * Tab 5 設定的優先時段，在**距離上課超過 14 天（兩週）**時，
     僅限該優先老師本人（或管理員）可預約；**進入開課前 14 天內**自動解鎖，開放所有老師預約。
@@ -69,7 +81,7 @@
 所有課堂狀態標籤統一由 `src/components/SignatureModals.tsx` 的`BookingStatusBadge` 
 渲染（**Tab 2、Tab 3、Tab 4 明細列表全部統一引用**），嚴格遵守以下 4 層順序：
 1. **⚡ 系統代簽 (`settlementType === 'system_deducted' || isSystemSigned`)**：月底結算由系統自動代扣 1 堂（橘色標籤）並認列老師鐘點費。
-2. **✕ 未到課 (`settlementType === 'unattended_no_credit_deducted'`)**：學生無故未到且未取消，不扣學員堂數。
+2. **✕ 未到課 (`settlementType === 'unattended_no_credit_deducted'`)**：學生無故未到且未取消（含月底強制結算未處理課堂），不扣學員堂數並計罰老師。
 3. **補簽 (`isLateSigned === true`)**：手寫簽名送出時，若 `booking.date < systemBaseDate`，自動標記為逾期補簽（黃色標籤）並扣 1 堂。
 4. **已簽到 (`signed === true`)**：準時手寫簽名完成（綠色標籤）並扣 1 堂。
 *(若有手寫筆跡 `signatureData` 為 Base64 圖片，同步顯示縮圖並支援點擊開啟 `SignatureZoomModal` 放大檢視)。*
@@ -98,7 +110,7 @@
 1. **任務 1 — 抽離型別與預設設定至 `src/types.ts`**：
    將 `src/mockData.ts` 頂部的介面移入 `src/types.ts` 並補齊 `BusinessHoursConfig`、`isSystemSigned`、`systemSignedAt`、`isSettlementLocked` 欄位（`reviewType` 支援 `'cancel' | 'reschedule' | 'after_hours' | 'settlement_undo'`），讓 `mockData.ts` 從 `./types` re-export。
 2. **任務 2 — 建立共用規則檔 `src/utils/bookingRules.ts`**：
-   抽離 `BUSINESS_MINUTES`、`DEFAULT_BUSINESS_HOURS`、`getStudentBookingPreset`、`isBookingOverdue`、`isCancelledBooking`（確保 `special_pending` 視同空位）、`resolveRoomAssignment`（處理 A/B/C 教室自動導正與讓位）、`checkBookingTimeConstraints`（驗證營業時間、1 小時/10 分鐘截止、3 個月上限、優先時段前兩週保護）、`calculateFreeCancelQuota`（計算 20 堂免費取消額度）。
+   抽離 `BUSINESS_MINUTES`、`DEFAULT_BUSINESS_HOURS`、`getStudentBookingPreset`、`isBookingOverdue`、`isCancelledBooking`（確保 `special_pending` 視同空位）、`resolveRoomAssignment`（處理 A/B 教室自動導正與讓位、1v2 禁入小教室與阻擋）、`checkBookingTimeConstraints`（驗證營業時間、1 小時/10 分鐘截止、3 個月上限、優先時段前兩週保護）、`calculateFreeCancelQuota`（計算 20 堂免費取消額度）。
 3. **任務 3 — 建立共用彈窗 `src/components/BookingEditModal.tsx`**：
    整併 Tab 2 與 Tab 3 重複的 `editingBooking` Modal，套用 `bookingRules.ts` 規則與 24H 內異動必填事由防呆。
 4. **任務 4 — 清理與拆分 `src/components/Tab3StudentManagement.tsx`**：
