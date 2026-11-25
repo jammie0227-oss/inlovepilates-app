@@ -431,8 +431,9 @@ export class ScheduleEngine {
     priorityGrid?: PriorityGrid;
     userRole?: 'admin' | 'teacher';
   }): { postponedBooking: BookingItem | null; alertMsg?: string } {
+    // 一般老師：3 個月 (90天) 上限（自基準日起算）；管理員不受限（僅設一年搜尋視窗避免無窮迴圈，見下方 searchStartDate）
     const limitDate = parseLocalDate(todayStr);
-    limitDate.setDate(limitDate.getDate() + 90); // 3 個月 (90天) 上限（自基準日起算）
+    limitDate.setDate(limitDate.getDate() + 90);
 
     // 尋找未來（>= 基準日）最後一堂佔額度的預排日作為推算起點
     const futureOccupied = currentBookings
@@ -446,6 +447,11 @@ export class ScheduleEngine {
     // 起點不得早於系統基準日
     const todayDate = parseLocalDate(todayStr);
     if (searchStartDate < todayDate) searchStartDate.setTime(todayDate.getTime());
+
+    if (userRole === 'admin') {
+      limitDate.setTime(searchStartDate.getTime());
+      limitDate.setDate(limitDate.getDate() + 366);
+    }
 
     const validSlots = slots.filter(s => s.freq !== '不固定');
     if (validSlots.length === 0) return { postponedBooking: null };

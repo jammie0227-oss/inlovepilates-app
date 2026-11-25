@@ -239,7 +239,7 @@ export default function StudentDetailView({
       }
       // 依據引擎判斷，保留安全保護區（已簽到、已逾期、已取消），僅替換或追加純預約
       const cleanBookings = bookings.filter((b: any) => !result.removedBookingIds.includes(b.id));
-      onAddBookings(result.newRecords, cleanBookings);
+      onAddBookings(result.newRecords, cleanBookings, mode);
       setAutoScheduleOpen(false);
       setScheduleResultModal(result);
 

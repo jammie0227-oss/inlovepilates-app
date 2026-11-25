@@ -791,26 +791,29 @@ export const validateAndBuildBooking = ({
 };
 
 /**
- * 加課替換：只能刪除「confirmed、未簽、isAuto === true」且日期不早於基準日的最遠一堂。
- * 手動預約、審核中（special_pending）、已鎖定者一律不可被替換。
+ * 加課替換：只能刪除「最遠一堂」自動預排，且該堂必須是「confirmed、未簽、isAuto === true」、日期不早於基準日。
+ * 手動預約、審核中（special_pending，含非營業時間待審）、已鎖定者一律不可被靜默替換：
+ * 若最遠一堂自動預排屬於審核中，不得改刪較近的課堂，直接回傳 undefined 交由呼叫端跳出提示。
  */
 export const findReplaceableAutoBooking = (
   bookings: BookingItem[],
   student: { id: string; name: string },
   systemBaseDate: string,
-): BookingItem | undefined =>
-  bookings
+): BookingItem | undefined => {
+  const farthest = bookings
     .filter(
       b =>
         matchesStudent(student, b.studentId, b.studentName) &&
-        b.status === 'confirmed' &&
+        b.isAuto === true &&
         !b.signed &&
         !b.isSettlementLocked &&
-        b.isAuto === true &&
-        b.date >= systemBaseDate,
+        b.date >= systemBaseDate &&
+        (b.status === 'confirmed' || (b.status === 'special_pending' && b.pendingKind === 'after_hours')),
     )
     .sort((a, b) => a.date.localeCompare(b.date) || a.startHour * 60 + a.startMin - (b.startHour * 60 + b.startMin))
     .pop();
+  return farthest && farthest.status === 'confirmed' ? farthest : undefined;
+};
 
 // ------------------------------------------
 // 簽名時間窗：開課前後各 1 小時

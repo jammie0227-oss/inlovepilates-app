@@ -318,7 +318,7 @@ export default function Home() {
   };
 
   // 支援重排替換 (Clean Baseline) 與一般新增累加
-  const handleAddBookings = (newBks: BookingItem[], cleanBase?: BookingItem[]) => {
+  const handleAddBookings = (newBks: BookingItem[], cleanBase?: BookingItem[], mode?: 'append_remaining' | 'replace_future') => {
     if (cleanBase) {
       setBookings(() => [...cleanBase, ...newBks]);
     } else {
@@ -331,7 +331,7 @@ export default function Home() {
       const ordered = [...newBks].sort((a, b) => a.date.localeCompare(b.date) || (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
       const pendingCount = newBks.filter(b => b.status === 'special_pending').length;
       addLog(
-        `自動排課（${cleanBase ? '重整未來' : '新增'}）：共排入 ${newBks.length} 堂\n` +
+        `自動排課（${mode === 'replace_future' ? '重整未來' : mode === 'append_remaining' ? '接續排課' : '新增'}）：共排入 ${newBks.length} 堂\n` +
         `${formatDateWithDay(ordered[0].date)} ${formatTimeStr(ordered[0].startHour, ordered[0].startMin)} ～ ${formatDateWithDay(ordered[ordered.length - 1].date)} ${formatTimeStr(ordered[ordered.length - 1].startHour, ordered[ordered.length - 1].startMin)}` +
         (pendingCount > 0 ? `\n其中 ${pendingCount} 堂為非營業時間，已批次送審` : ''),
         '預約', 'gray', f.studentName, f.teacherId, undefined, undefined,
@@ -965,36 +965,44 @@ export default function Home() {
     );
     showToast('已送出結算更正申請，待管理員審核');
   };
-  // --- 系統月底自動結算引擎（模擬 10/31 23:59） ---
-  const handleExecuteMonthEnd = async () => {
-    if (!await systemConfirm('【系統月底結算模擬】\n確定要執行嗎？\n(所有尚未處理的逾期課堂，將強制結算為老師逾期未取消並計罰)')) return;
+  // --- 月底未結清稽核與關帳（兩段式：催辦 ➔ 強制關帳） ---
+  const [isMonthEndOpen, setIsMonthEndOpen] = useState(false);
 
-    let settledCount = 0;
-    // 找出所有逾期未簽到的課堂
-    const overdueUnsignedList = bookings.filter(b => isOverdueUnsettled(b, systemBaseDate));
-
-    const updatedBookings = bookings.map(b => {
-      const isTarget = overdueUnsignedList.some(item => item.id === b.id);
-      if (!isTarget) return b;
-      
-      settledCount++;
-      // 壓線皆未處理 ➔ 強制判定為 special_rejected（計罰取消），累積至 Tab 4 統計表
+  // 階段一：催辦通知（黃色提醒，不計罰、不鎖定）
+  const handleSendMonthEndReminders = () => {
+    const list = bookings.filter(b => isOverdueUnsettled(b, systemBaseDate));
+    const byTeacher = new Map<string, number>();
+    list.forEach(b => byTeacher.set(b.teacherId, (byTeacher.get(b.teacherId) || 0) + 1));
+    if (byTeacher.size === 0) { systemAlert('目前無未結清課堂，無需發送催辦通知。'); return; }
+    byTeacher.forEach((n, tId) => {
       addLog(
-        `原課堂：${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)}\n結果：系統強制結算為逾期未取消 (計罰)\n事由：老師於月底前均未回報處理`,
+        `【月底關帳提醒】您目前尚有 ${n} 堂已過期課堂未完成簽到或取消，請於月底關帳前儘速處理，逾期將計罰 1 次。`,
+        '提醒', 'yellow', '', tId, undefined, undefined, '系統關帳'
+      );
+    });
+    systemAlert(`已發送催辦通知給 ${byTeacher.size} 位老師（共 ${list.length} 堂未結清），未變更課堂狀態、未計罰。`);
+  };
+
+  // 階段二：強制關帳（未結清全數計罰；二次確認在彈窗內完成）
+  const handleForceMonthEndClose = () => {
+    const targets = bookings.filter(b => isOverdueUnsettled(b, systemBaseDate));
+    if (targets.length === 0) { systemAlert('目前無未結清課堂。'); return; }
+    targets.forEach(b => {
+      addLog(
+        `原課堂：${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)}\n結果：月底關帳判定未到課 (計罰老師，不扣學員堂數)\n事由：老師於月底前均未回報處理`,
         '取消', 'red', b.studentName, b.teacherId, undefined, undefined, '系統結算'
       );
-      return {
-        ...b,
-        status: 'special_rejected' as const,
-        settlementType: 'unattended_no_credit_deducted' as const,
-        isSettlementLocked: true,
-        teacherNote: '系統月底結算：老師未處理逾期',
-      };
     });
-
-    const settledIds = new Set(overdueUnsignedList.map(b => b.id));
-    setBookings(prev => prev.map(b => settledIds.has(b.id) ? (updatedBookings.find(u => u.id === b.id) || b) : b));
-    systemAlert(`【系統月底結算完成】\n共強制結算 ${settledCount} 堂未處理逾期課堂為「計罰取消」。`);
+    const ids = new Set(targets.map(b => b.id));
+    setBookings(prev => prev.map(b => ids.has(b.id) ? {
+      ...b,
+      status: 'special_rejected' as const,
+      settlementType: 'unattended_no_credit_deducted' as const,
+      isSettlementLocked: true,
+      teacherNote: '系統月底關帳：老師未處理逾期',
+    } : b));
+    setIsMonthEndOpen(false);
+    systemAlert(`【月底關帳完成】共 ${targets.length} 堂未結清課堂已判定為未到課並計罰老師，課堂已鎖定。`);
   };
   // 審核處理（結果日誌統一第三行備註事由）
   const handleReview = (reviewId: string, decision: 'approved' | 'rejected') => {
@@ -1444,7 +1452,7 @@ export default function Home() {
       <div className="flex flex-col h-[100dvh] w-full max-w-none bg-slate-50 relative overflow-hidden font-sans">
         
         {systemDialog && (
-          <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-6">
+          <div className="fixed inset-0 z-[100001] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-6">
             <div role="dialog" aria-modal="true" className="w-full max-w-sm max-h-[90vh] overflow-y-auto bg-white rounded-3xl shadow-2xl p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
               <h3 className="text-base font-black text-slate-800">{systemDialog.title}</h3>
               <p className="text-sm text-slate-600 leading-relaxed whitespace-pre-line break-words max-h-[50vh] overflow-y-auto">{systemDialog.message}</p>
@@ -1460,7 +1468,7 @@ export default function Home() {
         )}
 
         {systemAlertModal && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-6" onClick={() => setSystemAlertModal(null)}>
+          <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-6" onClick={() => setSystemAlertModal(null)}>
             <div role="alertdialog" aria-modal="true" className="w-full max-w-sm max-h-[90vh] overflow-y-auto bg-white rounded-3xl shadow-2xl p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150" onClick={e => e.stopPropagation()}>
               <h3 className="text-base font-black text-slate-800">{systemAlertModal.title}</h3>
               <p className="text-sm text-slate-600 leading-relaxed whitespace-pre-line break-words max-h-[60vh] overflow-y-auto">{systemAlertModal.message}</p>
@@ -1605,10 +1613,10 @@ export default function Home() {
               <span className="text-sm font-black text-slate-800">規範與日誌審核</span>
               {userRole === 'admin' ? (
                 <button 
-                  onClick={handleExecuteMonthEnd} 
+                  onClick={() => setIsMonthEndOpen(true)} 
                   className="bg-amber-100 hover:bg-amber-200 active:scale-95 text-amber-900 border border-amber-300 px-2.5 py-1 rounded-xl text-[11px] font-black shadow-2xs transition"
                 >
-                  ⚡ 模擬月底結算
+                  🔒 月底未結清稽核與關帳
                 </button>
               ) : (
                 <span className="text-[10px] text-slate-400 font-mono">即時稽核中</span>
@@ -1795,6 +1803,11 @@ export default function Home() {
                 setStudioRules={setStudioRules} 
                 showToast={showToast} 
                 addLog={addLog} 
+                systemBaseDate={systemBaseDate}
+                isMonthEndOpen={isMonthEndOpen}
+                onCloseMonthEnd={() => setIsMonthEndOpen(false)}
+                onSendReminders={handleSendMonthEndReminders}
+                onForceClose={handleForceMonthEndClose}
               />
             )}
 

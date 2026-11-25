@@ -2,7 +2,7 @@
 import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
-import { calculateFreeCancelQuota, isTaughtBooking, getLogSeverity, getReviewTypeLabel } from '../utils/bookingRules';
+import { calculateFreeCancelQuota, isTaughtBooking, isOverdueUnsettled, getLogSeverity, getReviewTypeLabel } from '../utils/bookingRules';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -21,8 +21,24 @@ export default function Tab5RulesAndAudit({
   studioRules, 
   setStudioRules, 
   showToast, 
-  addLog 
+  addLog,
+  systemBaseDate,
+  isMonthEndOpen,
+  onCloseMonthEnd,
+  onSendReminders,
+  onForceClose
 }: any) {
+  const [meExpanded, setMeExpanded] = useState<Record<string, boolean>>({});
+  const [meConfirmOpen, setMeConfirmOpen] = useState(false);
+  const meGroups = useMemo(() => {
+    if (!isMonthEndOpen) return [] as { tId: string; name: string; items: any[] }[];
+    const m = new Map<string, any[]>();
+    (bookings as any[]).filter(b => isOverdueUnsettled(b, systemBaseDate)).forEach(b => m.set(b.teacherId, [...(m.get(b.teacherId) || []), b]));
+    return Array.from(m.entries()).map(([tId, items]) => ({ tId, name: teachers?.[tId]?.name || '老師', items: items.sort((a: any, b: any) => (a.date + a.startHour).localeCompare(b.date + b.startHour)) }));
+  }, [isMonthEndOpen, bookings, systemBaseDate, teachers]);
+  const meTotal = meGroups.reduce((n, g) => n + g.items.length, 0);
+  const closeMe = () => { setMeConfirmOpen(false); onCloseMonthEnd?.(); };
+
   const [slotModal, setSlotModal] = useState<string | null>(null);
   const [expandLogs, setExpandLogs] = useState(false);
   const [severityFilter, setSeverityFilter] = useState<'all' | 'red' | 'yellow' | 'gray'>('all');
@@ -779,6 +795,64 @@ export default function Tab5RulesAndAudit({
               >
                 儲存指派
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isMonthEndOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={closeMe}>
+          <div className="bg-white rounded-2xl w-full max-w-sm max-h-[85vh] flex flex-col shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+              <span className="text-sm font-black text-slate-800">月底未結清稽核與關帳</span>
+              <button onClick={closeMe} className="text-slate-400"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+              {meGroups.length === 0 ? (
+                <div className="text-center text-xs text-slate-400 py-8 font-bold">目前無未結清課堂</div>
+              ) : meGroups.map(g => (
+                <div key={g.tId} className="border border-slate-200 rounded-xl">
+                  <button className="w-full flex items-center justify-between px-3 py-2 text-xs font-black text-slate-700" onClick={() => setMeExpanded(p => ({ ...p, [g.tId]: !p[g.tId] }))}>
+                    <span>{g.name}：{g.items.length} 堂未結清</span>
+                    {meExpanded[g.tId] ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                  {meExpanded[g.tId] && (
+                    <ul className="px-3 pb-2 space-y-1 text-[11px] text-slate-600">
+                      {g.items.map((b: any) => (
+                        <li key={b.id} className="flex justify-between border-t border-slate-100 pt-1">
+                          <span>{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
+                          <span className="font-bold">{b.studentName}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+            {meGroups.length > 0 && (
+              <div className="px-4 py-3 border-t border-slate-100 space-y-3">
+                <button onClick={onSendReminders} className="w-full bg-amber-500 hover:bg-amber-600 active:scale-95 text-white text-xs font-black py-2.5 rounded-xl transition">
+                  📢 發送催辦通知給老師
+                </button>
+                <div className="border border-red-200 bg-red-50 rounded-xl p-2.5 space-y-1.5">
+                  <div className="text-[10px] text-red-600 font-bold">危險操作：最後期限強制關帳</div>
+                  <button onClick={() => setMeConfirmOpen(true)} className="w-full bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-black py-2 rounded-lg transition">
+                    🔒 強制關帳（未結清全數計罰）
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {isMonthEndOpen && meConfirmOpen && (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-6">
+          <div className="bg-white rounded-2xl w-full max-w-xs p-4 space-y-3 shadow-xl">
+            <div className="text-sm font-black text-red-600">二次確認</div>
+            <p className="text-xs text-slate-700 leading-relaxed">確定要將這 {meTotal} 堂未處理課堂全數判定為未到課並計罰老師嗎？執行後課堂將鎖定，如需撤銷須透過「結算更正」審核。</p>
+            <div className="flex gap-2">
+              <button onClick={() => setMeConfirmOpen(false)} className="flex-1 bg-slate-100 text-slate-700 text-xs font-black py-2 rounded-lg">取消</button>
+              <button onClick={() => { setMeConfirmOpen(false); onForceClose?.(); }} className="flex-1 bg-red-600 text-white text-xs font-black py-2 rounded-lg">確定關帳</button>
             </div>
           </div>
         </div>
