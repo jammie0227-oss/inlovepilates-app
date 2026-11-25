@@ -88,16 +88,14 @@ export interface BookingItem {
   isLateSigned?: boolean;
   isAuto?: boolean;
   type?: string;
-  /** special_pending 的來源：after_hours = 非營業時間預約待審（仍佔額度）；late_change = 24H 內異動/取消待審（不佔額度） */
-  pendingKind?: 'after_hours' | 'late_change';
-  /** 取消原因標記（例：after_hours_rejected = 非營業時間預約被駁回，不計入正常取消統計） */
+  /** special_pending 的來源：after_hours = 非營業時間預約待審、non_priority = 他人優先時段申請待審（兩者皆卡位、佔額度）；late_change = 24H 內異動/取消待審（不卡位、不佔額度） */
+  pendingKind?: 'after_hours' | 'non_priority' | 'late_change';
+  /** 取消原因標記（after_hours_rejected / non_priority_rejected = 送審預約被駁回，不計入正常取消統計） */
   cancelReason?: string;
-  /** 【僅執行期衍生，不寫入資料庫】改教室審核中：原課堂保留在原教室，並同時卡住目標教室 */
+  /** 【僅執行期衍生，不寫入資料庫】改教室審核中：檢視上課堂佔用新教室 (to)，原教室 (from) 視同釋出 */
   roomChangePending?: { from: 'large' | 'small'; to: 'large' | 'small' };
-  /** 【僅執行期衍生】改室審核期間在目標教室產生的佔位（非真實預約，不佔額度、不可操作） */
-  isHold?: boolean;
-  /** 佔位所屬的原預約 ID */
-  holdOf?: string;
+  /** 【僅執行期衍生】改室審核期間原教室的「原時段已釋出」虛線提示（非真實預約：不佔教室、不佔額度、不可操作） */
+  isReleasedGhost?: boolean;
 }
 
 export interface ReviewItem {
@@ -113,7 +111,7 @@ export interface ReviewItem {
   reason: string;
   status: 'pending' | 'approved' | 'rejected';
   phone?: string;
-  reviewType?: 'cancel' | 'reschedule' | 'after_hours' | 'settlement_undo' | 'room_change' | 'sign' | 'late_sign';
+  reviewType?: 'cancel' | 'reschedule' | 'after_hours' | 'settlement_undo' | 'room_change' | 'non_priority' | 'sign' | 'late_sign';
   /** 送審時間（YYYY/MM/DD HH:mm，建立審核單時精準記錄） */
   submittedAt?: string;
   reqDate?: string;
@@ -124,6 +122,10 @@ export interface ReviewItem {
   undoReason?: string;
   resolvedAt?: string;
   resolvedNote?: string;
+  /** 系統自動結案（非管理員裁決）：不可撤銷 */
+  autoClosed?: boolean;
+  /** 同一堂課的逾時異動經過（時間順序，含本單事件）；併單或後續異動時寫入 */
+  history?: string[];
   /** 批次審核（自動排課非營業時間）：本審核單涵蓋的所有課堂 ID，核准 / 駁回一次套用 */
   batchBookingIds?: string[];
   /** 批次審核前各課堂快照（供撤銷還原） */
@@ -186,6 +188,8 @@ export interface ScheduleEngineResult {
   hitHorizonLimit?: boolean;
   /** 本次因非營業時間而以 special_pending（待審）排入的堂數（管理員為 0） */
   afterHoursCount?: number;
+  /** 本次因他人優先時段而以 special_pending（待審）排入的堂數（管理員為 0） */
+  nonPriorityCount?: number;
   suggestedRoomSwaps?: {
     date: string;
     time: string;
@@ -193,6 +197,16 @@ export interface ScheduleEngineResult {
     reason: string;
   }[];
 }
+
+// 優先時段：同一組「星期-小時」只能擇一指派（大教室 / 小教室 / 不限教室）
+export interface PrioritySlot {
+  large?: string;
+  small?: string;
+  /** 不限教室（依課程決定）：大、小教室皆為該老師優先 */
+  all?: string;
+}
+/** key 格式：`${星期}-${小時}`，例如 '二-9' */
+export type PriorityGrid = Record<string, PrioritySlot>;
 
 // 單日營業時間設定
 export interface DayHoursConfig {

@@ -1,10 +1,10 @@
 'use client';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Lock, AlertTriangle } from 'lucide-react';
-import { formatTimeStr, formatDateWithDay } from '../mockData';
+import { formatTimeStr, formatDateWithDay, getDayOfWeek } from '../mockData';
 import { TeacherProfile, BookingItem, StudentItem, ReviewItem } from '../mockData';
-import type { BusinessHoursConfig } from '../types';
-import { getStudentBookingPreset, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, isSlotReleased, isActionableBooking, getReviewHoldLabel } from '../utils/bookingRules';
+import type { BusinessHoursConfig, PriorityGrid } from '../types';
+import { getStudentBookingPreset, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, isSlotReleased, isActionableBooking, getReviewHoldLabel, isPendingApproval } from '../utils/bookingRules';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
 import { systemAlert } from '../utils/systemAlert';
 
@@ -27,7 +27,7 @@ export default function Tab1StudioCalendar({
 }: {
   systemBaseDate: string;
   businessHours?: BusinessHoursConfig;
-  priorityGrid?: Record<string, { large?: string; small?: string }>;
+  priorityGrid?: PriorityGrid;
   userRole: 'admin' | 'teacher'; 
   currentUserId: string; 
   teachers: Record<string, TeacherProfile>;
@@ -65,7 +65,7 @@ export default function Tab1StudioCalendar({
 
   // 1. 課堂是否已被取消判定（一般取消、審核免罰取消、審核計罰取消，皆視為已釋出空位）
   // 課堂是否在排班總覽隱藏（釋出空位）：已取消 或 取消審核中，排班總覽一律不佔位，讓其他老師可直接預約
-  // 例外：非營業時間預約待審 (after_hours) 與改室審核佔位 (isHold / roomChangePending) 要卡住時段，不可隱藏
+  // 例外：送審中的新預約 (after_hours / non_priority) 與改室審核的新教室 (roomChangePending) 要卡住時段，不可隱藏
   const isCancelledBooking = (b: BookingItem) => {
     if (isSlotReleased(b)) {
       return true;
@@ -77,10 +77,11 @@ export default function Tab1StudioCalendar({
     return false;
   };
 
-  // 審核卡位卡片的標籤文字：「審核中（非營業時間）」/「改室審核中（原教室 ➔ 新教室）」
-  const getReviewBadgeLabel = (b: BookingItem) => getReviewHoldLabel(b) || '審核中';
+  // 審核卡位卡片的標籤文字：「改室審核」/「非優先審核」/「非營業審核」
+  const getReviewBadgeLabel = (b: BookingItem) =>
+    b.roomChangePending ? '改室審核' : getReviewHoldLabel(b) || '審核中';
   const isHeldByReview = (b: BookingItem) =>
-    !!b.isHold || !!b.roomChangePending || (b.status === 'special_pending' && b.pendingKind === 'after_hours');
+    !!b.roomChangePending || isPendingApproval(b);
 
   // 管理員點擊其他老師的預約卡片：直接開啟共用變更彈窗（改期 / 改室 / 取消）
   const [adminEditingBooking, setAdminEditingBooking] = useState<BookingItem | null>(null);
@@ -142,6 +143,22 @@ export default function Tab1StudioCalendar({
       ? undefined
       : { backgroundImage: 'repeating-linear-gradient(135deg, rgba(148,163,184,0.18) 0, rgba(148,163,184,0.18) 4px, transparent 4px, transparent 8px)', backgroundColor: 'rgba(241,245,249,0.7)' };
 
+  // 優先時段：極淺底色 + 極淡老師標籤（墊在課堂卡片下方，不攔截點擊）
+  const priorityTint = (dateStr: string, h: number, room: 'large' | 'small') => {
+    const slot = priorityGrid[`${getDayOfWeek(dateStr)}-${h}`];
+    const teacherId = slot?.all || slot?.[room]; // 不限教室：大、小教室同時顯示
+    const t = teacherId ? teachers[teacherId] : undefined;
+    if (!t) return null;
+    return (
+      <div className="absolute inset-0 pointer-events-none select-none">
+        <div className={`absolute inset-0 opacity-25 ${t.bgLight}`} />
+        <span className="absolute bottom-0.5 right-1 max-w-full truncate text-[8px] font-bold text-slate-500 opacity-40">
+          {t.name} 優先
+        </span>
+      </div>
+    );
+  };
+
   const weekScrollRef = useRef<HTMLDivElement>(null);
   const dayScrollRef = useRef<HTMLDivElement>(null);
 
@@ -191,11 +208,11 @@ export default function Tab1StudioCalendar({
 
       if (dayBookings.length > 0) {
         const earliestMins = Math.min(...dayBookings.map(b => b.startHour * 60 + b.startMin));
-        // 每分鐘 1px (60px/hr)，距離 8:00 (480 mins) 的距離
-        const scrollTarget = Math.max(0, earliestMins - 480);
+        // 每分鐘 1px (60px/hr)，以格線實際起始時間為原點
+        const scrollTarget = Math.max(0, earliestMins - hours[0] * 60);
         dayScrollRef.current.scrollTo({ top: scrollTarget, behavior: 'smooth' });
       } else {
-        // 當天無課程時預設置頂 8:00
+        // 當天無課程時預設置頂
         dayScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
       }
     }
@@ -204,7 +221,7 @@ export default function Tab1StudioCalendar({
   // 1v2 小教室衝突提醒
   const alert1v2Bookings = useMemo(() => {
     return bookings.filter(b => {
-      if (isSlotReleased(b) || b.isHold) return false;
+      if (isSlotReleased(b)) return false;
       if (b.lessonType !== '1v2' || b.roomType !== 'small') return false;
       if (view === 'day') return b.date === currentStr;
       return weekDays.some(w => w.dateStr === b.date);
@@ -309,10 +326,11 @@ export default function Tab1StudioCalendar({
               </div>
 
               {/* 大 / 小 教室 */}
-              {['large', 'small'].map((room, idx) => (
+              {(['large', 'small'] as const).map((room, idx) => (
                 <div key={room} className={`col-span-5 relative ${idx === 0 ? 'border-r border-slate-200' : ''}`} style={{ height: hours.length * 60 }}>
                   {hours.map(h => (
-                    <div key={h} style={closedStyle(currentStr, h)} className="h-[60px] flex flex-col border-b border-slate-200">
+                    <div key={h} style={closedStyle(currentStr, h)} className="relative h-[60px] flex flex-col border-b border-slate-200">
+                      {priorityTint(currentStr, h, room)}
                       {minutes.map(m => (
                         <button key={m} onClick={() => handleQuickBook(h, m, room, currentStr)} className="h-[10px] border-b border-dotted border-slate-100/60 hover:bg-rose-50/60 transition w-full" />
                       ))}
@@ -324,7 +342,8 @@ export default function Tab1StudioCalendar({
                     const isMyStudentCard = b.teacherId === currentUserId;
                     const canSeeDetails = userRole === 'admin' || isMyStudentCard;
                     const is1v2InSmall = b.lessonType === '1v2' && b.roomType === 'small';
-                    const isPendingReview = isHeldByReview(b);
+                    // 審核標示僅管理員與該堂老師本人可見；他人一律維持灰色隱私遮罩
+                    const isPendingReview = canSeeDetails && isHeldByReview(b);
 
                     return (
                       <div 
@@ -335,38 +354,39 @@ export default function Tab1StudioCalendar({
                         className={`absolute inset-x-1 z-10 rounded-lg p-1 flex flex-col justify-center shadow-2xs select-none transition ${
                           isMyStudentCard || userRole === 'admin' ? 'cursor-pointer hover:scale-[1.01]' : 'cursor-default'
                         } ${
-                          isPendingReview 
-                            ? 'bg-amber-50/95 border-2 border-dashed border-amber-400 text-amber-950' 
-                            : getBookingStyle(b)
+                          getBookingStyle(b)
                         } ${
                           is1v2InSmall ? 'border-2 border-rose-500 ring-2 ring-rose-200 shadow-md animate-pulse' : ''
                         }`}
                       >
-                        {isPendingReview && (
-                          <span className="self-start max-w-full text-[8px] leading-[10px] bg-amber-500 text-white font-black px-1 py-px rounded shadow-2xs break-words mb-0.5">
-                            {getReviewBadgeLabel(b)}
-                          </span>
-                        )}
-
-                        {is1v2InSmall && !isPendingReview && (
-                          <div className="absolute top-0.5 right-1 flex items-center gap-1">
-                            <span className="text-[8px] bg-rose-600 text-white px-1 rounded font-bold">1v2 小教室</span>
-                            <span className="w-2 h-2 bg-rose-500 rounded-full animate-ping" />
-                          </div>
-                        )}
-
                         {canSeeDetails ? (
                           <>
-                            <div className="text-xs font-black truncate">{b.studentName}</div>
-                            <div className="text-[10px] font-bold opacity-90 leading-tight mt-0.5">
+                            {/* 第一行：姓名靠左、狀態短標籤固定右上角（不換行） */}
+                            <div className="flex items-center justify-between gap-1 min-w-0">
+                              <span className="min-w-0 truncate text-xs leading-4 font-black">{b.studentName}</span>
+                              {isPendingReview ? (
+                                <span className="shrink-0 self-start whitespace-nowrap text-[9px] leading-[12px] bg-amber-500 text-white font-black px-1 rounded shadow-2xs">
+                                  {getReviewBadgeLabel(b)}
+                                </span>
+                              ) : is1v2InSmall ? (
+                                <span className="shrink-0 self-start whitespace-nowrap text-[9px] leading-[12px] bg-rose-600 text-white font-bold px-1 rounded">1v2小室</span>
+                              ) : null}
+                            </div>
+                            {/* 第二行：時間 類別 */}
+                            <div className="text-[10px] font-bold opacity-90 leading-[14px] whitespace-nowrap truncate">
                               {formatTimeStr(b.startHour, b.startMin)} <span className="bg-white/60 px-1 rounded ml-0.5 text-slate-800">{b.lessonType}</span>
                             </div>
                           </>
                         ) : (
-                          <div className="flex items-center justify-center font-bold text-[11px] gap-1 font-mono opacity-80">
-                            <Lock className="w-3 h-3 shrink-0" />
-                            <span>{b.lessonType}</span>
-                          </div>
+                          <>
+                            {is1v2InSmall && (
+                              <span className="absolute top-0.5 right-1 text-[9px] leading-[12px] bg-rose-600 text-white px-1 rounded font-bold">1v2小室</span>
+                            )}
+                            <div className="flex items-center justify-center font-bold text-[11px] gap-1 font-mono opacity-80">
+                              <Lock className="w-3 h-3 shrink-0" />
+                              <span>{b.lessonType}</span>
+                            </div>
+                          </>
                         )}
                       </div>
                     );
@@ -411,10 +431,11 @@ export default function Tab1StudioCalendar({
                   <div key={dIdx} className={`grid grid-cols-2 gap-0.5 p-0.5 relative ${
                     item.isPast ? 'bg-slate-100/70 grayscale opacity-80' : 'bg-slate-50/10'
                   }`}>
-                    {['large', 'small'].map(room => (
+                    {(['large', 'small'] as const).map(room => (
                       <div key={room} className="relative" style={{ height: hours.length * 60 }}>
                         {hours.map(h => (
-                          <div key={h} style={closedStyle(item.dateStr, h)} className="h-[60px] flex flex-col border-b border-slate-200">
+                          <div key={h} style={closedStyle(item.dateStr, h)} className="relative h-[60px] flex flex-col border-b border-slate-200">
+                            {priorityTint(item.dateStr, h, room)}
                             {minutes.map(m => (
                               <button key={m} onClick={() => handleQuickBook(h, m, room, item.dateStr)} className="h-[10px] border-b border-dotted border-slate-100/60 hover:bg-rose-50/60 transition w-full" />
                             ))}
@@ -426,7 +447,8 @@ export default function Tab1StudioCalendar({
                           const isMyStudentCard = b.teacherId === currentUserId;
                           const canSeeDetails = userRole === 'admin' || isMyStudentCard;
                           const is1v2InSmall = b.lessonType === '1v2' && b.roomType === 'small';
-                          const isPendingReview = isHeldByReview(b);
+                          // 審核標示僅管理員與該堂老師本人可見；他人一律維持灰色隱私遮罩
+                          const isPendingReview = canSeeDetails && isHeldByReview(b);
 
                           return (
                             <div 
@@ -437,15 +459,13 @@ export default function Tab1StudioCalendar({
                               className={`absolute inset-x-0.5 z-10 rounded p-1 flex flex-col justify-center shadow-2xs select-none transition ${
                                 isMyStudentCard || userRole === 'admin' ? 'cursor-pointer hover:scale-[1.02]' : 'cursor-default'
                               } ${
-                                isPendingReview 
-                                  ? 'bg-amber-50/95 border border-dashed border-amber-400 text-amber-950' 
-                                  : getBookingStyle(b)
+                                getBookingStyle(b)
                               } ${
                                 is1v2InSmall ? 'border border-rose-500 animate-pulse ring-1 ring-rose-300' : ''
                               }`}
                             >
                               {isPendingReview ? (
-                                <span className="text-[8px] leading-[9px] bg-amber-500 text-white font-black px-1 py-px rounded text-center self-center mb-0.5 break-words max-w-full">
+                                <span className="text-[8px] leading-[9px] tracking-tighter bg-amber-500 text-white font-sans font-black px-0.5 py-px rounded text-center self-center mb-0.5 break-words max-w-full">
                                   {getReviewBadgeLabel(b)}
                                 </span>
                               ) : is1v2InSmall ? (
@@ -454,10 +474,10 @@ export default function Tab1StudioCalendar({
 
                               {canSeeDetails ? (
                                 <>
-                                  <span className="text-xs font-black truncate text-center">
+                                  <span className="shrink-0 text-xs leading-tight font-black truncate text-center">
                                     {b.studentName}
                                   </span>
-                                  <span className="text-[10px] font-mono text-center font-bold mt-0.5">
+                                  <span className="text-[10px] leading-none font-mono text-center font-bold mt-0.5">
                                     {b.lessonType}
                                   </span>
                                 </>

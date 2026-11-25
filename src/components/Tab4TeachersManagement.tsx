@@ -14,7 +14,7 @@ export const generatePriorityConclusion = (teacherId: string, grid: Record<strin
   const dayHours: Record<string, number[]> = {};
 
   Object.entries(grid).forEach(([slotKey, data]) => {
-    if (data.large === teacherId || data.small === teacherId) {
+    if (data.all === teacherId || data.large === teacherId || data.small === teacherId) {
       const [d, hStr] = slotKey.split('-');
       const h = parseInt(hStr, 10);
       if (!dayHours[d]) dayHours[d] = [];

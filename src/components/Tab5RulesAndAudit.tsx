@@ -1,8 +1,8 @@
 'use client';
 import React, { useState, useMemo } from 'react';
-import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X } from 'lucide-react';
+import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X, Lock } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
-import { calculateFreeCancelQuota, isTaughtBooking, isOverdueUnsettled, getLogSeverity, getReviewTypeLabel } from '../utils/bookingRules';
+import { calculateFreeCancelQuota, isTaughtBooking, isOverdueUnsettled, getLogSeverity, getReviewTypeLabel, isPendingApproval } from '../utils/bookingRules';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -40,6 +40,17 @@ export default function Tab5RulesAndAudit({
   const closeMe = () => { setMeConfirmOpen(false); onCloseMonthEnd?.(); };
 
   const [slotModal, setSlotModal] = useState<string | null>(null);
+  // 指派彈窗草稿：同一時段「不限教室 / 大教室 / 小教室」只能擇一
+  const [slotDraft, setSlotDraft] = useState({ all: '', large: '', small: '' });
+  const openSlotModal = (slotKey: string) => {
+    const cur = priorityGrid[slotKey] || {};
+    setSlotDraft({
+      all: cur.all || '',
+      large: cur.all ? '' : cur.large || '',
+      small: cur.all || cur.large ? '' : cur.small || '',
+    });
+    setSlotModal(slotKey);
+  };
   const [expandLogs, setExpandLogs] = useState(false);
   const [severityFilter, setSeverityFilter] = useState<'all' | 'red' | 'yellow' | 'gray'>('all');
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -132,7 +143,8 @@ export default function Tab5RulesAndAudit({
   };
 
   const isRoomChangeReview = (item: any) => {
-    return item.reviewType === 'room_change' || item.reason?.includes('改教室') || item.reason?.includes('改室');
+    if (item.reviewType) return item.reviewType === 'room_change';
+    return item.reason?.includes('改教室') || item.reason?.includes('改室');
   };
 
   // 清洗名稱：去除「老師」贅字與「學員」假名
@@ -198,7 +210,7 @@ export default function Tab5RulesAndAudit({
               {pendingReviews.map((item: any) => {
                 const isRoomChange = isRoomChangeReview(item);
                 const isExpanded = !!expandedReviews[item.id];
-                const isLargeRoom = item.room?.includes('大') || item.reqRoom === 'large';
+                const isLargeRoom = !!item.room?.includes('大');
                 const cleanTeacher = (item.teacherName || '老師').replace(/ 老師|老師/g, '').trim();
 
                 return (
@@ -209,7 +221,7 @@ export default function Tab5RulesAndAudit({
                     <div className="flex justify-between items-center gap-2">
                       <div 
                         onClick={() => toggleReviewExpand(item.id)}
-                        className="flex items-center gap-1.5 text-xs font-bold text-slate-800 cursor-pointer select-none"
+                        className="flex items-center flex-wrap gap-1.5 min-w-0 text-xs font-bold text-slate-800 cursor-pointer select-none"
                       >
                         <span className="text-sm font-black text-rose-600">{cleanTeacher}</span>
                         {item.studentName && item.studentName !== '學員' && (
@@ -220,13 +232,13 @@ export default function Tab5RulesAndAudit({
                             ? 'bg-purple-50 text-purple-700 border border-purple-200' 
                             : 'bg-rose-50 text-rose-700 border border-rose-200'
                         }`}>
-                          {isRoomChange ? '改室' : getReviewTypeLabel(item)}
+                          {getReviewTypeLabel(isRoomChange ? { reviewType: 'room_change' } : item)}
                         </span>
                         {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-slate-400 ml-0.5" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-0.5" />}
                       </div>
 
                       <div className="flex gap-1.5 shrink-0">
-                        {(isRoomChange || item.reviewType === 'after_hours' || item.reviewType === 'settlement_undo') ? (
+                        {(isRoomChange || item.reviewType === 'after_hours' || item.reviewType === 'non_priority' || item.reviewType === 'settlement_undo') ? (
                           <>
                             <button 
                               onClick={() => onReview(item.id, 'approved')} 
@@ -272,6 +284,35 @@ export default function Tab5RulesAndAudit({
                       );
                     })()}
 
+                    {isRoomChange && (
+                      <div className="text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-lg px-2 py-1">
+                        核准：確認教室變更並解除審核標示；駁回：原教室仍空閒時退回原教室。不計罰。
+                      </div>
+                    )}
+
+                    {/* 批次單中已到課簽到的課堂提示 */}
+                    {(item.batchBookingIds?.length ?? 0) > 0 && (bookings as any[]).some(b => item.batchBookingIds.includes(b.id) && b.signed) && (
+                      <div className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                        部分課堂已簽到授課：核准 / 駁回僅影響仍待審的課堂。
+                      </div>
+                    )}
+
+                    {/* 同一堂課的異動經過：併單後只裁決一次 */}
+                    {item.history?.length > 0 && (
+                      <div className="text-[10px] text-slate-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 space-y-0.5">
+                        <p className="font-black text-amber-800">異動經過（本堂只裁決一次）</p>
+                        {item.history.map((line: string, i: number) => (
+                          <p key={i} className="break-words">{i + 1}. {line}</p>
+                        ))}
+                      </div>
+                    )}
+                    {(!item.reviewType || item.reviewType === 'cancel' || item.reviewType === 'reschedule') &&
+                      (bookings as any[]).some(b => b.id === item.bookingId && (b.penaltyCount || 0) > 0) && (
+                      <div className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1">
+                        此堂已計罰 1 次，本次按「計罰」不再累加。
+                      </div>
+                    )}
+
                     {/* 展開詳細內容：清楚標註「🟣 大教室 / 🟢 小教室」文字與異動目標 */}
                     {isExpanded ? (
                       <div className="p-2.5 bg-slate-50 rounded-xl text-xs text-slate-700 space-y-2 border border-slate-100 animate-in fade-in duration-150">
@@ -313,7 +354,7 @@ export default function Tab5RulesAndAudit({
                             </div>
                           )}
 
-                          {item.reviewType === 'after_hours' && item.batchBookingIds && item.batchBookingIds.length > 0 && (
+                          {(item.reviewType === 'after_hours' || item.reviewType === 'non_priority') && item.batchBookingIds && item.batchBookingIds.length > 0 && (
                             <div className="w-full font-sans text-slate-700 space-y-0.5">
                               <div className="text-slate-400">批次課堂（核准 / 駁回整批一次套用）：</div>
                               {(bookings as any[])
@@ -322,6 +363,7 @@ export default function Tab5RulesAndAudit({
                                 .map(b => (
                                   <div key={b.id} className="font-mono text-[11px]">
                                     {b.roomType === 'large' ? '🟣' : '🟢'} {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)} ({b.lessonType})
+                                    {b.signed ? ' · 已簽到' : !isPendingApproval(b) ? ' · 已取消' : ''}
                                   </div>
                                 ))}
                             </div>
@@ -330,7 +372,14 @@ export default function Tab5RulesAndAudit({
                           {item.reviewType === 'after_hours' && (
                             <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
                               <span className="text-slate-400">類型：</span>
-                              <span className="font-normal text-slate-600">非營業時間預約（核准後生效、駁回則不成立）</span>
+                              <span className="font-normal text-slate-600">非營業審核（核准後生效、駁回則不成立）</span>
+                            </div>
+                          )}
+
+                          {item.reviewType === 'non_priority' && (
+                            <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
+                              <span className="text-slate-400">類型：</span>
+                              <span className="font-normal text-slate-600">非優先審核（核准後生效、駁回則釋出時段）</span>
                             </div>
                           )}
 
@@ -431,13 +480,13 @@ export default function Tab5RulesAndAudit({
 
         {noticeCardOpen && (
           <div className="space-y-2 animate-in fade-in duration-150">
-            {/* 三級分類篩選：全部 / 紅色重要 / 黃色提醒 / 灰階一般 */}
+            {/* 三級分類篩選：全部 / 重要 / 提醒 / 一般 */}
             <div className="flex flex-wrap gap-1.5 text-[11px] font-bold">
               {([
                 ['all', '全部', 'bg-slate-800 text-white border-slate-800', 'bg-white text-slate-600 border-slate-200'],
-                ['red', '🔴 紅色重要', 'bg-rose-500 text-white border-rose-500', 'bg-rose-50 text-rose-700 border-rose-200'],
-                ['yellow', '🟡 黃色提醒', 'bg-amber-500 text-white border-amber-500', 'bg-amber-50 text-amber-700 border-amber-200'],
-                ['gray', '⚪ 灰階一般', 'bg-slate-500 text-white border-slate-500', 'bg-slate-50 text-slate-600 border-slate-200'],
+                ['red', '🔴 重要', 'bg-rose-500 text-white border-rose-500', 'bg-rose-50 text-rose-700 border-rose-200'],
+                ['yellow', '🟡 提醒', 'bg-amber-500 text-white border-amber-500', 'bg-amber-50 text-amber-700 border-amber-200'],
+                ['gray', '⚪ 一般', 'bg-slate-500 text-white border-slate-500', 'bg-slate-50 text-slate-600 border-slate-200'],
               ] as const).map(([key, label, on, off]) => (
                 <button
                   key={key}
@@ -498,7 +547,6 @@ export default function Tab5RulesAndAudit({
                         <button 
                           onClick={() => { 
                             onReset(l.reviewId!); 
-                            showToast('已撤銷審核結果'); 
                           }} 
                           className="bg-white border border-slate-300 p-1.5 rounded-lg text-slate-600 hover:bg-slate-50 transition shadow-2xs active:scale-95"
                           title="Undo 撤銷審核"
@@ -623,7 +671,7 @@ export default function Tab5RulesAndAudit({
               </span>
             ))}
             <span className="text-slate-300">|</span>
-            <span className="text-slate-400 font-normal">左格: 大教室 / 右格: 小教室</span>
+            <span className="text-slate-400 font-normal">左格: 大教室 / 右格: 小教室 / 長條: 不限教室</span>
           </div>
         </button>
         
@@ -650,35 +698,49 @@ export default function Tab5RulesAndAudit({
                       {days.map(d => {
                         const slotKey = `${d}-${h}`;
                         const slotData = priorityGrid[slotKey] || {};
+                        const allT = slotData.all ? teachers[slotData.all] : null;
                         const largeT = slotData.large ? teachers[slotData.large] : null;
                         const smallT = slotData.small ? teachers[slotData.small] : null;
 
                         return (
                           <td 
                             key={d} 
-                            onClick={() => { if (userRole === 'admin') setSlotModal(slotKey); }} 
+                            onClick={() => { if (userRole === 'admin') openSlotModal(slotKey); }} 
                             className={`py-1.5 px-0.5 border-r border-slate-100 last:border-r-0 transition ${
                               userRole === 'admin' ? 'cursor-pointer hover:bg-rose-50/80' : ''
                             }`}
                           >
+                            {allT ? (
+                              <div className="flex justify-center items-center">
+                                <span
+                                  className={`w-5 h-2 rounded-full ${allT.color} shadow-2xs ring-1 ring-white`}
+                                  title={`不限教室: ${allT.name}`}
+                                />
+                              </div>
+                            ) : (
                             <div className="grid grid-cols-2 gap-0.5 w-full max-w-[24px] mx-auto items-center justify-center">
                               <div className="flex justify-end items-center">
-                                {largeT && (
+                                {largeT ? (
                                   <span 
                                     className={`w-2 h-2 rounded-full ${largeT.color} shadow-2xs ring-1 ring-white`} 
                                     title={`大教室: ${largeT.name}`} 
                                   />
-                                )}
+                                ) : smallT ? (
+                                  <span title="小教室已設優先" className="flex"><Lock className="w-2 h-2 text-slate-300" /></span>
+                                ) : null}
                               </div>
                               <div className="flex justify-start items-center">
-                                {smallT && (
+                                {largeT ? (
+                                  <span title="大教室已設優先" className="flex"><Lock className="w-2 h-2 text-slate-300" /></span>
+                                ) : smallT ? (
                                   <span 
                                     className={`w-2 h-2 rounded-full ${smallT.color} shadow-2xs ring-1 ring-white`} 
                                     title={`小教室: ${smallT.name}`} 
                                   />
-                                )}
+                                ) : null}
                               </div>
                             </div>
+                            )}
                           </td>
                         );
                       })}
@@ -740,15 +802,31 @@ export default function Tab5RulesAndAudit({
             
             <div className="space-y-3.5">
               <div>
+                <label className="font-bold text-slate-700 block mb-1.5">🏠 不限教室（依課程決定）優先老師</label>
+                <select
+                  value={slotDraft.all}
+                  disabled={!!slotDraft.large || !!slotDraft.small}
+                  onChange={e => setSlotDraft(d => ({ ...d, all: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 font-bold bg-white outline-none focus:ring-1 focus:ring-rose-400 transition shadow-2xs disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
+                >
+                  <option value="">{slotDraft.large ? '大教室已設優先' : slotDraft.small ? '小教室已設優先' : '(無 / 留空)'}</option>
+                  {activeTeachers.map((t: any) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="font-bold text-purple-700 block mb-1.5 flex items-center gap-1">
                   <span className="w-2.5 h-2.5 rounded-full bg-purple-500 shadow-2xs"></span> 🏛️ 大教室優先老師
                 </label>
                 <select 
-                  id="assign-large" 
-                  defaultValue={priorityGrid[slotModal]?.large || ''} 
-                  className="w-full border border-slate-200 rounded-xl p-2.5 font-bold bg-white outline-none focus:ring-1 focus:ring-purple-400 transition shadow-2xs"
+                  value={slotDraft.large} 
+                  disabled={!!slotDraft.all || !!slotDraft.small}
+                  onChange={e => setSlotDraft(d => ({ ...d, large: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 font-bold bg-white outline-none focus:ring-1 focus:ring-purple-400 transition shadow-2xs disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
                 >
-                  <option value="">(無 / 留空)</option>
+                  <option value="">{slotDraft.all ? '已設不限教室' : slotDraft.small ? '小教室已設優先' : '(無 / 留空)'}</option>
                   {activeTeachers.map((t: any) => (
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
@@ -760,11 +838,12 @@ export default function Tab5RulesAndAudit({
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-2xs"></span> 🧘 小教室優先老師
                 </label>
                 <select 
-                  id="assign-small" 
-                  defaultValue={priorityGrid[slotModal]?.small || ''} 
-                  className="w-full border border-slate-200 rounded-xl p-2.5 font-bold bg-white outline-none focus:ring-1 focus:ring-emerald-400 transition shadow-2xs"
+                  value={slotDraft.small} 
+                  disabled={!!slotDraft.all || !!slotDraft.large}
+                  onChange={e => setSlotDraft(d => ({ ...d, small: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 font-bold bg-white outline-none focus:ring-1 focus:ring-emerald-400 transition shadow-2xs disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
                 >
-                  <option value="">(無 / 留空)</option>
+                  <option value="">{slotDraft.all ? '已設不限教室' : slotDraft.large ? '大教室已設優先' : '(無 / 留空)'}</option>
                   {activeTeachers.map((t: any) => (
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
@@ -781,12 +860,13 @@ export default function Tab5RulesAndAudit({
               </button>
               <button 
                 onClick={() => {
-                  const lVal = (document.getElementById('assign-large') as HTMLSelectElement).value;
-                  const sVal = (document.getElementById('assign-small') as HTMLSelectElement).value;
-                  addLog?.(`優先時段設定修改\n${slotModal}：大教室 ${teachers[lVal]?.name || '無'}、小教室 ${teachers[sVal]?.name || '無'}`, '設定', 'gray', '', currentUserId, undefined, undefined, 'Daisy');
+                  const aVal = slotDraft.all;
+                  const lVal = aVal ? '' : slotDraft.large;
+                  const sVal = aVal || lVal ? '' : slotDraft.small;
+                  addLog?.(`優先時段設定修改\n${slotModal}：${aVal ? `不限教室 ${teachers[aVal]?.name || '無'}` : `大教室 ${teachers[lVal]?.name || '無'}、小教室 ${teachers[sVal]?.name || '無'}`}`, '設定', 'gray', '', currentUserId, undefined, undefined, 'Daisy');
                   setPriorityGrid((prev: any) => ({ 
                     ...prev, 
-                    [slotModal]: { large: lVal || undefined, small: sVal || undefined } 
+                    [slotModal]: { all: aVal || undefined, large: lVal || undefined, small: sVal || undefined } 
                   }));
                   setSlotModal(null);
                   showToast('優先時段已更新');

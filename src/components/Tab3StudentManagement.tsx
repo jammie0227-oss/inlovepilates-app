@@ -19,8 +19,8 @@ export { default as StudentDetailView } from './StudentDetailView';
 // 1. 第一層：學生管理清單
 // ==========================================
 export default function Tab3StudentManagement({ 
-  systemBaseDate,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, addLog, onSmartBook, showToast, teachers, bookings,onSign,
-  userRole, businessHours, priorityGrid
+  systemBaseDate,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, addLog, onSmartBook, showToast, teachers, bookings, calendarBookings, onSign,
+  userRole, businessHours, priorityGrid, getPriorityHint
 }: any) {
   const [sortField, setSortField] = useState<'name' | 'next'>('name');
   const [sortDesc, setSortDesc] = useState(false);
@@ -72,6 +72,21 @@ export default function Tab3StudentManagement({
     });
     return list;
   }, [myStudents, sortField, sortDesc]);
+
+  // 體驗課時段：他人優先時段即時提示
+  const trialPriorityHint: string | null = isCreateModalOpen && createMode === 'trial'
+    ? getPriorityHint?.({
+        date: trialDate,
+        startHour: parseInt(trialHour, 10),
+        startMin: parseInt(trialMin, 10),
+        durationMins: 50,
+        teacherId: currentUserId,
+        studentId: '',
+        studentName: newStudentName,
+        roomType: trialRoom,
+        lessonType: trialLessonType,
+      }) ?? null
+    : null;
 
   const handleSort = (field: 'name' | 'next') => {
     if (sortField === field) setSortDesc(!sortDesc);
@@ -203,7 +218,8 @@ export default function Tab3StudentManagement({
       addLog?.(`新增正式學員：${newStudentName}（初始 ${initialCreditsNum} 堂）`, '學員資料', 'gray', newStudentName, currentUserId);
 
       if (!isNoRegular && newRegularStudent.credits > 0) {
-        const engine = new ScheduleEngine(bookings, teachers, studentsMap);
+        // 排課引擎使用含改室審核衍生資料的課表（新教室佔位、原教室釋出）
+        const engine = new ScheduleEngine(calendarBookings || bookings, teachers, studentsMap);
         const result = engine.generateSchedule({
           sid: newId,
           sName: newStudentName,
@@ -440,6 +456,12 @@ export default function Tab3StudentManagement({
                       </select>
                     </div>
                   </div>
+
+                  {trialPriorityHint && (
+                    <div className="rounded-xl border-2 border-rose-400 bg-rose-50 p-2.5 font-black text-rose-700 leading-relaxed">
+                      {trialPriorityHint}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -611,6 +633,13 @@ export default function Tab3StudentManagement({
             <div className="p-2.5 bg-indigo-50 border border-indigo-100 rounded-xl text-indigo-900 font-bold leading-tight">
               {scheduleModalResult.message}
             </div>
+
+            {((scheduleModalResult.afterHoursCount ?? 0) + (scheduleModalResult.nonPriorityCount ?? 0)) > 0 && (
+              <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
+                ⏳ 其中 {(scheduleModalResult.afterHoursCount ?? 0) + (scheduleModalResult.nonPriorityCount ?? 0)} 堂需經管理員審核
+                （非營業審核 {scheduleModalResult.afterHoursCount ?? 0} 堂、非優先審核 {scheduleModalResult.nonPriorityCount ?? 0} 堂），核准前標示為待審核。
+              </div>
+            )}
 
             {/* 課表文字預覽區 */}
             <div className="max-h-52 overflow-y-auto p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-[11px] whitespace-pre-wrap select-all text-slate-700">

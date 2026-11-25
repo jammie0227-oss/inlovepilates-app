@@ -8,15 +8,16 @@ import type {
   ReviewItem,
   BookingItem,
   BusinessHoursConfig,
+  PriorityGrid,
   StudentItem,
   TeacherProfile,
 } from '../types';
-import { checkGlobalConflict, isCancelledSlot } from './conflict';
+import { checkGlobalConflict, isCancelledSlot, isHoldingPendingKind } from './conflict';
 
 type RoomType = 'large' | 'small';
 type LessonType = '1v1' | '1v2';
 type UserRole = 'admin' | 'teacher';
-export type PriorityGrid = Record<string, { large?: string; small?: string }>;
+export type { PriorityGrid };
 
 /** 分鐘選項（每 10 分鐘一格） */
 export const BUSINESS_MINUTES: string[] = ['00', '10', '20', '30', '40', '50'];
@@ -124,18 +125,29 @@ export const isFutureLesson = (
 ): boolean => hoursUntilLesson(dateStr, startHour, startMin, systemBaseDate) > 0;
 
 /**
- * 佔用學員堂數額度（全站唯一口徑）：confirmed，或「非營業時間預約待審」，且尚未簽到。
+ * 佔用學員堂數額度（全站唯一口徑）：confirmed，或「送審中的新預約（非營業時間 / 非優先申請）」，且尚未簽到。
  * 取消（含 24H 內送審取消）與學員堂數完全脫鉤：special_pending 的 late_change 不佔額度。
  * 注意：此函式只回答「額度」；是否可簽到 / 改期 / 結算請用 isActionableBooking。
  */
-export const occupiesQuota = (b: Pick<BookingItem, 'status' | 'signed' | 'pendingKind' | 'isHold'>): boolean =>
-  !b.isHold &&
-  (b.status === 'confirmed' || (b.status === 'special_pending' && b.pendingKind === 'after_hours')) && !b.signed;
+export const occupiesQuota = (b: Pick<BookingItem, 'status' | 'signed' | 'pendingKind' | 'isReleasedGhost'>): boolean =>
+  !b.isReleasedGhost && (b.status === 'confirmed' || isPendingApproval(b)) && !b.signed;
+
+/** 送審中的新預約（非營業時間 / 非優先申請）：卡住時段、佔學員額度，核准前不可操作 */
+export const isPendingApproval = (b: Pick<BookingItem, 'status' | 'pendingKind'>): boolean =>
+  b.status === 'special_pending' && isHoldingPendingKind(b.pendingKind);
 
 /** 可被老師操作的有效課堂：confirmed、未簽、未結算鎖定（簽到 / 改期 / 取消 / 結算的狀態防護）。 */
 export const isActionableBooking = (
   b: Pick<BookingItem, 'status' | 'signed' | 'isSettlementLocked'>,
 ): boolean => b.status === 'confirmed' && !b.signed && !b.isSettlementLocked;
+
+/**
+ * 可簽到 / 取消的課堂：有效課堂，或尚在審核中的新預約（非營業 / 非優先），且未簽、未結算鎖定。
+ * 改期 / 改室仍須用 isActionableBooking，並另外排除改室審核中的課堂。
+ */
+export const isSignableBooking = (
+  b: Pick<BookingItem, 'status' | 'signed' | 'isSettlementLocked' | 'pendingKind'>,
+): boolean => !b.signed && !b.isSettlementLocked && (b.status === 'confirmed' || isPendingApproval(b));
 
 /** 已實際授課：有效預約且已簽到（含補簽、系統代簽）。 */
 export const isTaughtBooking = (b: Pick<BookingItem, 'status' | 'signed'>): boolean =>
@@ -156,25 +168,35 @@ export const matchesStudent = (
 
 /**
  * 是否已釋出空位：一般取消、免罰、計罰，以及 24H 內異動/取消待審（special_pending / late_change）。
- * 例外：非營業時間預約待審（pendingKind === 'after_hours'）會卡住時段，駁回後才釋出。
+ * 例外：送審中的新預約（非營業時間 / 非優先申請）會卡住時段，駁回後才釋出。
  */
 export const isCancelledBooking = (status: string, pendingKind?: string): boolean =>
   isCancelledSlot(status, pendingKind);
 
-/** 以整筆課堂判斷是否已釋出空位（日曆渲染與衝堂檢測共用） */
-export const isSlotReleased = (b: Pick<BookingItem, 'status' | 'pendingKind'>): boolean =>
-  isCancelledSlot(b.status, b.pendingKind);
+/** 以整筆課堂判斷是否已釋出空位（日曆渲染與衝堂檢測共用）；改室審核的原教室提示一律視為空位 */
+export const isSlotReleased = (b: Pick<BookingItem, 'status' | 'pendingKind' | 'isReleasedGhost'>): boolean =>
+  !!b.isReleasedGhost || isCancelledSlot(b.status, b.pendingKind);
 
 // ------------------------------------------
-// 審核期間的卡位 (after_hours 預約 / room_change 改室)
+// 審核期間的卡位 (after_hours / non_priority 預約、room_change 改室)
 // ------------------------------------------
+
+/** 改室審核期間，原教室格子上的提示文字 */
+export const RELEASED_SLOT_LABEL = '原時段釋出';
+
+/** 審核狀態短標籤（全站唯一來源，一律 5 字以內） */
+export const REVIEW_TAG = {
+  room_change: '改室審核',
+  after_hours: '非營業審核',
+  non_priority: '非優先審核',
+} as const;
 
 /**
- * 依「待審的改教室申請 (room_change)」衍生佔位資料：
- *  - 原課堂維持原教室並標記 roomChangePending
- *  - 同時在目標教室產生一筆不可操作的佔位 (isHold)，審核期間兩間教室都被卡住
- * 核准（原課堂搬到新教室）、駁回或撤回後，因審核單不再是 pending，佔位自然消失。
- * 回傳值僅供「衝堂檢測 / 日曆顯示」使用，不可寫回課堂資料或用於額度、結算計算。
+ * 依「待審的改教室申請 (room_change)」衍生檢視資料：
+ *  - 課堂改為佔用「目標新教室」並標記 roomChangePending（禁止他人預約 / 排課撞進去）
+ *  - 「原教室」視同已釋出：僅產生一筆提示用的 isReleasedGhost（不佔教室、不佔額度、不可操作）
+ * 核准（原課堂寫入新教室）、駁回（維持原教室）後，因審核單不再是 pending，衍生資料自然消失。
+ * 回傳值供「衝堂檢測 / 排課引擎 / 日曆顯示」使用，不可寫回課堂資料。
  */
 export const applyPendingHolds = (
   bookings: BookingItem[],
@@ -186,27 +208,25 @@ export const applyPendingHolds = (
   if (pending.length === 0) return bookings;
   const byBooking = new Map(pending.map(r => [r.bookingId as string, r]));
   const result: BookingItem[] = [];
-  const holds: BookingItem[] = [];
+  const ghosts: BookingItem[] = [];
   for (const b of bookings) {
     const rev = byBooking.get(b.id);
-    if (rev && b.status === 'confirmed' && !b.signed && rev.reqRoom && rev.reqRoom !== b.roomType) {
+    if (rev?.reqRoom && !isSlotReleased(b) && rev.reqRoom !== b.roomType) {
       const marker = { from: b.roomType, to: rev.reqRoom };
-      result.push({ ...b, roomChangePending: marker });
-      holds.push({ ...b, id: `hold-${rev.id}`, roomType: rev.reqRoom, isHold: true, holdOf: b.id, roomChangePending: marker });
+      result.push({ ...b, roomType: rev.reqRoom, roomChangePending: marker });
+      ghosts.push({ ...b, id: `ghost-${rev.id}`, isReleasedGhost: true, roomChangePending: marker });
     } else {
       result.push(b);
     }
   }
-  return [...result, ...holds];
+  return [...result, ...ghosts];
 };
 
 /** 審核卡位標籤（日曆卡片顯示用）；無審核卡位時回傳 null */
 export const getReviewHoldLabel = (b: BookingItem): string | null => {
-  if (b.roomChangePending) {
-    const name = (r: 'large' | 'small') => (r === 'large' ? '大教室' : '小教室');
-    return `改室審核中（${name(b.roomChangePending.from)} ➔ ${name(b.roomChangePending.to)}）`;
-  }
-  if (b.status === 'special_pending' && b.pendingKind === 'after_hours') return '審核中（非營業時間）';
+  if (b.isReleasedGhost) return RELEASED_SLOT_LABEL;
+  if (b.roomChangePending) return REVIEW_TAG.room_change;
+  if (isPendingApproval(b)) return b.pendingKind === 'non_priority' ? REVIEW_TAG.non_priority : REVIEW_TAG.after_hours;
   return null;
 };
 
@@ -246,9 +266,7 @@ const timeLabel = (h: number, m: number) => `${String(h).padStart(2, '0')}:${Str
 
 /** 時段內仍有效（未釋出）的課堂 */
 const liveBookings = (existing: BookingItem[], excludeBookingId?: string) =>
-  existing.filter(
-    b => !isSlotReleased(b) && (!excludeBookingId || (b.id !== excludeBookingId && b.holdOf !== excludeBookingId)),
-  );
+  existing.filter(b => !isSlotReleased(b) && (!excludeBookingId || b.id !== excludeBookingId));
 
 /**
  * 被移動的舊 1v1 能否安全搬進小教室：以「它自己完整的 50 分鐘區間」檢查
@@ -268,6 +286,13 @@ export const canRelocateToSmall = (
     const sameStudent = moved.studentId ? b.studentId === moved.studentId : b.studentName === moved.studentName;
     return b.roomType === 'small' || b.teacherId === moved.teacherId || sameStudent;
   });
+};
+
+/** 套用大教室讓位結果：被移課堂改為小教室（供衝堂檢測與寫入使用） */
+export const applyAutoSwaps = (bookings: BookingItem[], swaps: AutoSwapItem[]): BookingItem[] => {
+  if (swaps.length === 0) return bookings;
+  const ids = new Set(swaps.map(s => s.bookingId));
+  return bookings.map(b => (ids.has(b.id) ? { ...b, roomType: 'small' as const } : b));
 };
 
 export const resolveRoomAssignment = ({
@@ -328,9 +353,11 @@ export const resolveRoomAssignment = ({
 
   // 大教室智慧讓位：所有重疊課堂都是「有效、未簽」的 1v1，且每一堂都能以自己完整 50 分鐘區間
   // 搬進小教室（小教室、任課老師、學員皆無衝堂）。任何一堂不行就整體放棄讓位（不可局部移動）。
+  // 改室審核中：「大 ➔ 小」的 1v1 在檢視資料上已位於小教室（大教室視同釋出，不需讓位）；
+  // 「小 ➔ 大」在大教室是新教室保留佔位，不可被移走。
   const yieldable =
     largeBusy.every(
-      b => b.lessonType === '1v1' && b.status === 'confirmed' && !b.signed && !b.isHold && !b.roomChangePending,
+      b => b.lessonType === '1v1' && b.status === 'confirmed' && !b.signed && !b.roomChangePending,
     ) &&
     largeBusy.every(b => canRelocateToSmall(b, existingBookings, excludeBookingId));
   if (yieldable) {
@@ -368,19 +395,25 @@ export type TimeConstraintCode =
   | 'past'
   | 'deadline'
   | 'too_far'
-  | 'priority_locked'
+  | 'non_priority'
   | 'after_hours';
+
+/** 送審類型：他人優先時段優先於非營業時間（兩者同時成立時送 non_priority） */
+export type BookingReviewKind = 'after_hours' | 'non_priority';
 
 export interface TimeConstraintResult {
   /** 管理員於開課前 10 分鐘內（含已開課 / 過去時段）預約：允許，但須提醒「將直接寫入課表」 */
   urgent?: boolean;
-  /** 是否可繼續（after_hours 對老師為 true 但需送審） */
+  /** 是否可繼續（after_hours / non_priority 對老師為 true 但需送審） */
   allowed: boolean;
-  /** 非營業時間：一般老師須填事由、建立 special_pending 並送 after_hours 審核單 */
+  /** 一般老師需建立 special_pending 並送審（類型見 reviewKind） */
   requiresReview: boolean;
+  reviewKind?: BookingReviewKind;
+  /** 落在非營業時間（一般老師須填事由） */
+  offHours?: boolean;
   code: TimeConstraintCode;
   reason?: string;
-  /** 他人優先時段（已進入 14 天開放期或管理員操作）：呼叫端應提醒確認 */
+  /** 他人優先時段的老師；未達送審條件時（14 天內或管理員操作）呼叫端應提醒確認 */
   priorityOwnerId?: string;
 }
 
@@ -452,12 +485,26 @@ export const findOtherPriorityOwner = ({
   const lastHour = Math.floor((s + durationMins - 1) / 60);
   for (let h = firstHour; h <= lastHour; h++) {
     const slot = priorityGrid[`${dayName}-${h}`] || {};
-    const owners = roomType ? [slot[roomType]] : [slot.large, slot.small];
+    // 「不限教室」(all) 同時涵蓋大、小教室
+    const owners = roomType ? [slot.all, slot[roomType]] : [slot.all, slot.large, slot.small];
     const other = owners.find(o => o && o !== teacherId);
     if (other) return other;
   }
   return undefined;
 };
+
+/** 一般老師預約他人優先時段且距上課超過 14 天 → 需送審 */
+export const needsPriorityReview = ({
+  dateStr,
+  systemBaseDate,
+  userRole,
+  priorityOwnerId,
+}: {
+  dateStr: string;
+  systemBaseDate: string;
+  userRole: UserRole;
+  priorityOwnerId?: string;
+}): boolean => userRole !== 'admin' && !!priorityOwnerId && diffDays(dateStr, systemBaseDate) > 14;
 
 export const checkBookingTimeConstraints = ({
   dateStr,
@@ -534,26 +581,34 @@ export const checkBookingTimeConstraints = ({
     };
   }
 
-  // 3. 優先時段：以完整區間逐格比對。距上課 > 14 天僅限優先老師本人（或管理員）；
-  //    14 天內開放，但回傳 priorityOwnerId 供呼叫端提醒。
+  // 3. 優先時段：以完整區間逐格比對。距上課 > 14 天，其他一般老師可預約但需送審（non_priority）；
+  //    14 天內開放直接預約，但回傳 priorityOwnerId 供呼叫端提醒。
   const priorityOwnerId = findOtherPriorityOwner({
     dateStr, startHour, startMin, durationMins, roomType, teacherId, priorityGrid,
   });
-  if (!isAdmin && priorityOwnerId && daysAhead > 14) {
+  // 4. 營業時間（含公休日）；管理員不受限
+  const offHours = !isAdmin && !isWithinBusinessHours(dateStr, startHour, startMin, businessHours, durationMins);
+
+  if (needsPriorityReview({ dateStr, systemBaseDate, userRole, priorityOwnerId })) {
     return {
-      allowed: false,
-      requiresReview: false,
-      code: 'priority_locked',
-      reason: '此為其他老師的優先時段，開課前 14 天內才開放預約',
+      allowed: true,
+      requiresReview: true,
+      reviewKind: 'non_priority',
+      offHours,
+      code: 'non_priority',
+      reason: offHours
+        ? '此時段為其他老師的優先時段且為非營業時間，需填寫事由並送管理員審核'
+        : '此時段為其他老師的優先時段，送出後需經管理員審核',
       priorityOwnerId,
     };
   }
 
-  // 4. 營業時間（含公休日）；管理員不受限
-  if (!isAdmin && !isWithinBusinessHours(dateStr, startHour, startMin, businessHours, durationMins)) {
+  if (offHours) {
     return {
       allowed: true,
       requiresReview: true,
+      reviewKind: 'after_hours',
+      offHours,
       code: 'after_hours',
       reason: '此時段為非營業時間，需填寫事由並送管理員審核',
       priorityOwnerId,
@@ -598,8 +653,11 @@ export interface ValidateBookingResult {
   urgent?: boolean;
   /** 已套用最終教室、狀態的預約（ok=true 時） */
   booking?: BookingItem;
-  /** 非營業時間：呼叫端須取得事由，booking.status 已為 special_pending */
+  /** 需送審：booking.status 已為 special_pending */
   requiresReview: boolean;
+  reviewKind?: BookingReviewKind;
+  /** 落在非營業時間：呼叫端須取得事由 */
+  offHours?: boolean;
   reviewReason?: string;
   /** 教室調度提示（導正教室 / 讓位） */
   notices: string[];
@@ -647,7 +705,7 @@ export const validateAndBuildBooking = ({
   studentOverride?: Pick<StudentItem, 'id' | 'name' | 'credits'>;
   /** 改期時排除自己 */
   excludeBookingId?: string;
-  /** reschedule：非營業時間不可送審（直接阻擋）；額度不變 */
+  /** reschedule：非營業時間 / 他人優先時段不可送審（直接阻擋）；額度不變 */
   mode?: 'create' | 'reschedule';
   /** 僅改教室（時間未變）時略過時間限制 */
   skipTimeConstraints?: boolean;
@@ -695,6 +753,8 @@ export const validateAndBuildBooking = ({
   // 2. 時間限制
   let requiresReview = false;
   let reviewReason: string | undefined;
+  let reviewKind: BookingReviewKind | undefined;
+  let offHours = false;
   let priorityOwnerId: string | undefined;
   let urgent = false;
   if (!skipTimeConstraints) {
@@ -713,19 +773,31 @@ export const validateAndBuildBooking = ({
     });
     if (!tc.allowed) return fail(tc.reason || '不符合預約時間規定', 'time');
     if (tc.requiresReview && mode === 'reschedule') {
-      return fail('改期至非營業時間需由管理員處理，請聯絡管理員或另行新增預約送審', 'time');
+      const target = tc.reviewKind === 'non_priority' ? '他人優先時段' : '非營業時間';
+      return fail(`改期至${target}需由管理員處理，請聯絡管理員或另行新增預約送審`, 'time');
     }
     urgent = !!tc.urgent;
     requiresReview = tc.requiresReview;
     reviewReason = tc.reason;
+    reviewKind = tc.reviewKind;
+    offHours = !!tc.offHours;
     priorityOwnerId = tc.priorityOwnerId;
+  } else {
+    // 僅改教室：不可藉由換教室繞過他人優先時段送審（24H 內改室本身即送審，且不會超過 14 天）
+    const original = bookings.find(b => b.id === excludeBookingId);
+    const owner = original && original.roomType !== finalRoom
+      ? findOtherPriorityOwner({
+          dateStr: input.date, startHour: input.startHour, startMin: input.startMin,
+          durationMins: duration, roomType: finalRoom, teacherId: input.teacherId, priorityGrid,
+        })
+      : undefined;
+    if (needsPriorityReview({ dateStr: input.date, systemBaseDate, userRole, priorityOwnerId: owner })) {
+      return fail('改至他人優先時段的教室需由管理員處理，請聯絡管理員或另行新增預約送審', 'time');
+    }
   }
 
   // 3. 全局衝堂（讓位成功時，被移課堂視為已在小教室）
-  const swapIds = new Set(autoSwaps.map(s => s.bookingId));
-  const effective = swapIds.size
-    ? bookings.map(b => (swapIds.has(b.id) ? { ...b, roomType: 'small' as const } : b))
-    : bookings;
+  const effective = applyAutoSwaps(bookings, autoSwaps);
   const studentsMap: Record<string, StudentItem> = Object.fromEntries(students.map(s => [s.id, s]));
   const conflict = checkGlobalConflict({
     dateStr: input.date,
@@ -772,7 +844,7 @@ export const validateAndBuildBooking = ({
     roomType: finalRoom,
     lessonType: input.lessonType,
     status: requiresReview ? 'special_pending' : 'confirmed',
-    pendingKind: requiresReview ? 'after_hours' : undefined,
+    pendingKind: reviewKind,
     signed: false,
   };
 
@@ -781,6 +853,8 @@ export const validateAndBuildBooking = ({
     booking,
     urgent,
     requiresReview,
+    reviewKind,
+    offHours,
     reviewReason,
     notices,
     autoSwaps,
@@ -793,7 +867,7 @@ export const validateAndBuildBooking = ({
 /**
  * 加課替換：只能刪除「最遠一堂」自動預排，且該堂必須是「confirmed、未簽、isAuto === true」、日期不早於基準日。
  * 手動預約、審核中（special_pending，含非營業時間待審）、已鎖定者一律不可被靜默替換：
- * 若最遠一堂自動預排屬於審核中，不得改刪較近的課堂，直接回傳 undefined 交由呼叫端跳出提示。
+ * 若最遠一堂自動預排屬於審核中（含改室審核），不得改刪較近的課堂，直接回傳 undefined 交由呼叫端跳出提示。
  */
 export const findReplaceableAutoBooking = (
   bookings: BookingItem[],
@@ -805,14 +879,64 @@ export const findReplaceableAutoBooking = (
       b =>
         matchesStudent(student, b.studentId, b.studentName) &&
         b.isAuto === true &&
+        !b.isReleasedGhost &&
         !b.signed &&
         !b.isSettlementLocked &&
         b.date >= systemBaseDate &&
-        (b.status === 'confirmed' || (b.status === 'special_pending' && b.pendingKind === 'after_hours')),
+        (b.status === 'confirmed' || isPendingApproval(b)),
     )
     .sort((a, b) => a.date.localeCompare(b.date) || a.startHour * 60 + a.startMin - (b.startHour * 60 + b.startMin))
     .pop();
-  return farthest && farthest.status === 'confirmed' ? farthest : undefined;
+  return farthest && farthest.status === 'confirmed' && !farthest.roomChangePending ? farthest : undefined;
+};
+
+// ------------------------------------------
+// 自動排課額度明細
+// ------------------------------------------
+
+export interface ScheduleQuota {
+  /** 學生剩餘堂數（簽到當下已扣堂） */
+  totalRemaining: number;
+  /** 歷史簽到：僅供參考，不參與扣減 */
+  signedCount: number;
+  /** 逾期紀錄：日期早於基準日、未簽到且仍佔額度 */
+  overdueCount: number;
+  /** 待審核預約：未來未簽到的待審課堂（非營業時間 / 非優先申請，及改室審核中） */
+  pendingCount: number;
+  /** 已經預排：未來 confirmed（不含改室審核中） */
+  confirmedFutureCount: number;
+  /** 剩餘可排 = max(0, 剩餘 - (逾期 + 待審 + 已預排)) */
+  availableToSchedule: number;
+  /** 重排總堂數 = max(0, 剩餘 - (逾期 + 待審)) */
+  replaceTotal: number;
+}
+
+/**
+ * 逾期 / 待審 / 已預排三者互斥，合計等於 occupiesQuota 的佔用堂數。
+ * bookings 需傳入含改室審核衍生資料（applyPendingHolds）的清單。
+ * 24H 內取消待審 (late_change) 不佔額度，不列入待審核預約。
+ */
+export const getScheduleQuota = (
+  bookings: BookingItem[],
+  student: { id: string; name: string; credits: number },
+  systemBaseDate: string,
+): ScheduleQuota => {
+  const own = bookings.filter(b => !b.isReleasedGhost && matchesStudent(student, b.studentId, b.studentName));
+  const occupied = own.filter(occupiesQuota);
+  const upcoming = occupied.filter(b => !isBookingOverdue(b.date, systemBaseDate));
+  const overdueCount = occupied.length - upcoming.length;
+  const pendingCount = upcoming.filter(b => isPendingApproval(b) || !!b.roomChangePending).length;
+  const confirmedFutureCount = upcoming.length - pendingCount;
+  const totalRemaining = student.credits;
+  return {
+    totalRemaining,
+    signedCount: own.filter(isTaughtBooking).length,
+    overdueCount,
+    pendingCount,
+    confirmedFutureCount,
+    availableToSchedule: Math.max(0, totalRemaining - (overdueCount + pendingCount + confirmedFutureCount)),
+    replaceTotal: Math.max(0, totalRemaining - (overdueCount + pendingCount)),
+  };
 };
 
 // ------------------------------------------
@@ -897,11 +1021,11 @@ export interface TeacherMonthStats {
   count1v1: number;
   count1v2: number;
   total: number;
-  /** 正常取消（送出即累計；不含非營業時間預約被駁回） */
+  /** 正常取消（送出即累計；不含送審預約被駁回） */
   normalCancel: number;
   /** 超時取消（24H 內取消，送出即累計，不等管理員審核；審核結果不影響此欄） */
   lateCancel: number;
-  /** 計罰次數：僅審核裁決 / 系統結算的結果（逾期取消計罰 + 逾期改期計罰 + 月底未到課計罰） */
+  /** 計罰次數：僅審核裁決 / 系統結算的結果（逾期取消 / 逾期改期 / 月底未到課），一堂課最多 1 次 */
   penalty: number;
 }
 
@@ -920,7 +1044,8 @@ export const getTeacherStats = (
   const count1v1 = list.filter(b => b.lessonType === '1v1' && isTaughtBooking(b)).length;
   const count1v2 = list.filter(b => b.lessonType === '1v2' && isTaughtBooking(b)).length;
   const normalCancel = list.filter(
-    b => b.status === 'cancelled_normal' && b.cancelReason !== 'after_hours_rejected',
+    b => b.status === 'cancelled_normal' &&
+      b.cancelReason !== 'after_hours_rejected' && b.cancelReason !== 'non_priority_rejected',
   ).length;
   // 超時取消：24H 內取消送出即計（待審 / 免罰 / 計罰皆算）；月底系統強制結算者並非老師送出的取消，不列入
   const lateCancel = list.filter(
@@ -929,10 +1054,8 @@ export const getTeacherStats = (
       b.status === 'special_approved' ||
       (b.status === 'special_rejected' && b.settlementType !== 'unattended_no_credit_deducted'),
   ).length;
-  const penalty = list.reduce(
-    (n, b) => n + (b.status === 'special_rejected' ? 1 : 0) + (b.penaltyCount || 0),
-    0,
-  );
+  // 一堂課最多計罰一次（逾期改期、逾期取消、月底強制結算不累加）
+  const penalty = list.filter(b => b.status === 'special_rejected' || (b.penaltyCount || 0) > 0).length;
   return { count1v1, count1v2, total: count1v1 + count1v2, normalCancel, lateCancel, penalty };
 };
 
@@ -947,11 +1070,12 @@ export const getLogSeverity = (l: Pick<AuditLogItem, 'category'> & { severity?: 
   l.severity ?? (l.category === 'red' ? 'red' : l.category === 'yellow' ? 'yellow' : 'gray');
 
 /** 審核卡片業務類型標籤 */
-export const getReviewTypeLabel = (r: Pick<ReviewItem, 'reviewType' | 'reason'>): string => {
+export const getReviewTypeLabel = (r: Pick<ReviewItem, 'reviewType'>): string => {
   switch (r.reviewType) {
-    case 'room_change': return '改室';
+    case 'room_change': return REVIEW_TAG.room_change;
     case 'reschedule': return '逾期改期';
-    case 'after_hours': return '非營業時間';
+    case 'after_hours': return REVIEW_TAG.after_hours;
+    case 'non_priority': return REVIEW_TAG.non_priority;
     case 'settlement_undo': return '結算更正';
     case 'sign': return '簽到';
     case 'late_sign': return '補簽';

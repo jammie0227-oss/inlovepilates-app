@@ -39,6 +39,8 @@ interface BookingEditModalProps {
   bookings?: any[];
   /** 標題顯示的學員名稱；未提供時取 booking.studentName */
   studentName?: string;
+  /** 待審核課堂：僅能取消，不顯示改期 / 改室欄位 */
+  cancelOnly?: boolean;
   /** 以下供共用驗證 validateAndBuildBooking 使用 */
   businessHours?: BusinessHoursConfig;
   priorityGrid?: PriorityGrid;
@@ -56,6 +58,7 @@ export default function BookingEditModal({
   systemBaseDate,
   bookings = [],
   studentName,
+  cancelOnly = false,
   businessHours = DEFAULT_BUSINESS_HOURS,
   priorityGrid = {},
   teachers = {},
@@ -176,7 +179,7 @@ export default function BookingEditModal({
       <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-3.5 animate-in zoom-in-95 border border-slate-100 text-xs">
         <div className="flex justify-between items-center border-b border-slate-100 pb-2">
           <h3 className="text-sm font-black text-slate-800">
-            變更 / 取消預約 ({studentName || booking.studentName})
+            {cancelOnly ? '取消預約' : '變更 / 取消預約'} ({studentName || booking.studentName})
           </h3>
           <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400">
             <X className="w-4 h-4" />
@@ -202,6 +205,13 @@ export default function BookingEditModal({
           </div>
         </div>
 
+        {cancelOnly && (
+          <p className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-2">
+            審核完成前無法變更時段或教室，僅可取消課堂。
+          </p>
+        )}
+
+        {!cancelOnly && (
         <div className="space-y-2.5">
           <div>
             <label className="font-bold text-slate-600 block mb-1">修改日期</label>
@@ -249,13 +259,14 @@ export default function BookingEditModal({
             </div>
           </div>
         </div>
+        )}
 
         {/* 一般老師距開課小於 24 小時：必填事由 */}
         {needsReason && (
           <div className="space-y-1.5 p-2.5 bg-amber-50 border border-amber-200 rounded-2xl animate-in fade-in">
             <div className="flex items-center gap-1.5 text-amber-900 font-bold text-[11px]">
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>⚠️ 距上課小於 24 小時，請務必填寫異動事由：</span>
+              <span>{cancelOnly ? '⚠️ 逾時取消（距上課小於 24 小時），須填事由送審：' : '⚠️ 距上課小於 24 小時，請務必填寫異動事由：'}</span>
             </div>
             <textarea
               value={reason}
@@ -268,7 +279,8 @@ export default function BookingEditModal({
         )}
 
         {/* 前後無改動：變更課堂灰階禁用 */}
-        <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-100">
+        <div className={`grid ${cancelOnly ? 'grid-cols-1' : 'grid-cols-2'} gap-2 pt-1 border-t border-slate-100`}>
+          {!cancelOnly && (
           <button
             onClick={() => handleConfirm(false)}
             disabled={isUnchanged}
@@ -281,6 +293,7 @@ export default function BookingEditModal({
           >
             變更課堂
           </button>
+          )}
           <button
             onClick={() => handleConfirm(true)}
             className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 py-2.5 rounded-xl font-bold transition shadow-xs text-xs"

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { PenTool, X, RotateCcw, Check } from 'lucide-react';
-import { getSignatureWindowStatus } from '../utils/bookingRules';
+import { getSignatureWindowStatus, REVIEW_TAG } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
 
 // ==========================================
@@ -165,9 +165,9 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }
           ⚡ 系統代簽
         </span>
       ) : b.settlementType === 'unattended_no_credit_deducted' ? (
-        /* 2. 未到課 (不扣堂) */
+        /* 2. 未到課（不扣堂） */
         <span className="text-[10px] bg-slate-200 text-slate-600 font-bold px-2 py-0.5 rounded-full shadow-2xs">
-          ✕ 未到課 (未扣堂)
+          ✕ 未到課
         </span>
       ) : b.isLateSigned ? (
         /* 3. 逾期補簽 (金黃色標籤) */
@@ -182,7 +182,9 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }
       ) : b.status === 'cancelled_normal' ? (
         /* 5. 取消類 */
         b.cancelReason === 'after_hours_rejected' ? (
-          <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非營業時間駁回</span>
+          <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非營業駁回</span>
+        ) : b.cancelReason === 'non_priority_rejected' ? (
+          <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非優先駁回</span>
         ) : (
           <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold shadow-2xs">正常取消</span>
         )
@@ -191,11 +193,13 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }
       ) : b.status === 'special_approved' ? (
         <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">免罰取消</span>
       ) : b.status === 'special_pending' ? (
-        /* 6. 待審核：區分非營業時間 / 24H 內異動 */
+        /* 6. 待審核：區分非營業時間 / 非優先申請 / 24H 內異動 */
         b.pendingKind === 'after_hours' ? (
-          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">審核中（非營業時間）</span>
+          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG.after_hours}</span>
+        ) : b.pendingKind === 'non_priority' ? (
+          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG.non_priority}</span>
         ) : (
-          <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">24H內異動待審</span>
+          <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">異動審核</span>
         )
       ) : showUpcoming ? (
         <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full shadow-2xs">尚未開始</span>

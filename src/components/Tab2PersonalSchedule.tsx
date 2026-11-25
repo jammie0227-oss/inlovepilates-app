@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3, X } from
 import { formatTimeStr, formatDateWithDay, getDayOfWeek } from '../mockData';
 import { BookingStatusBadge, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { isOverdueUnsettled, isSlotReleased, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, getReviewHoldLabel } from '../utils/bookingRules';
+import { isOverdueUnsettled, isSlotReleased, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, getReviewHoldLabel, isPendingApproval, REVIEW_TAG } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
 
 export default function Tab2PersonalSchedule({
@@ -60,11 +60,11 @@ export default function Tab2PersonalSchedule({
   // 變更 / 取消 預約彈窗狀態
   const [editingBooking, setEditingBooking] = useState<any>(null);
 
-  // 申請結算更正（已鎖定之結算不可自行撤銷）
+  // 結算更正：一般老師須送審；管理員直接生效
   const [undoTarget, setUndoTarget] = useState<any>(null);
   const [undoReason, setUndoReason] = useState('');
   const submitUndoRequest = () => {
-    if (!undoReason.trim()) return systemAlert('請填寫申請結算更正的事由');
+    if (!undoReason.trim()) return systemAlert('請填寫結算更正的事由');
     if (onRequestSettlementUndo) onRequestSettlementUndo(undoTarget.id, undoReason.trim());
     setUndoTarget(null);
     setUndoReason('');
@@ -73,7 +73,6 @@ export default function Tab2PersonalSchedule({
   const [activeSignModal, setActiveSignModal] = useState<{ id: string; studentName: string } | null>(null);
   const [zoomedImage, setZoomedImage] = useState<{ url: string; time: string } | null>(null);
 
-  const dayScrollRef = useRef<HTMLDivElement>(null);
   const weekVerticalScrollRef = useRef<HTMLDivElement>(null);
 
   
@@ -112,6 +111,23 @@ export default function Tab2PersonalSchedule({
       };
     });
   }, [baseDate, offset]);
+
+  // 改室審核中：課堂資料仍保留原教室，畫面一律以「預計使用的教室」顏色呈現，只多掛「改室審核」標籤
+  const roomChangeTargets = new Map<string, 'large' | 'small'>(
+    calendarSource
+      .filter((b: any) => !b.isReleasedGhost && b.roomChangePending)
+      .map((b: any) => [b.id, b.roomChangePending.to])
+  );
+  const displayRoom = (b: any): 'large' | 'small' => roomChangeTargets.get(b.id) ?? b.roomType;
+  const roomChangeTag = (id: string) =>
+    roomChangeTargets.has(id) && (
+      <span className="shrink-0 text-[10px] font-sans bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">{REVIEW_TAG.room_change}</span>
+    );
+
+  // 審核中的課堂沿用教室顏色，僅多掛這個文字標籤
+  const reviewTagLabel = (b: any): string | null => getReviewHoldLabel(b);
+  // 待審核（非營業 / 非優先 / 改室）：審核完成前不可變更，仍可簽名與取消
+  const isUnderReview = (b: any): boolean => isPendingApproval(b) || roomChangeTargets.has(b.id);
 
   // 個人名下所有課程
   const myBookings = useMemo(() => {
@@ -157,12 +173,15 @@ export default function Tab2PersonalSchedule({
     return `${bg} ${text} ${lineStyle} ${pastOpacity}`;
   };
   const upcomingBookingsForDay = useMemo(() => {
-    return myBookings.filter((b: any) => b.date === currentStr && !b.signed && b.status === 'confirmed');
+    return myBookings
+      .filter((b: any) => b.date === currentStr && !b.signed && (b.status === 'confirmed' || isPendingApproval(b)))
+      .sort((a: any, b: any) => (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
   }, [myBookings, currentStr]);
 
   const historyBookingsForDay = useMemo(() => {
     return myBookings.filter((b: any) => {
       if (b.date !== currentStr) return false;
+      if (!b.signed && isPendingApproval(b)) return false; // 待審核課堂歸入「即將上課」
       return b.signed || b.status === 'cancelled_normal' || b.status === 'special_approved' || b.status === 'special_rejected' || b.status === 'special_pending';
     }).sort((a: any, b: any) => (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
   }, [myBookings, currentStr]);
@@ -191,23 +210,13 @@ export default function Tab2PersonalSchedule({
   };
 
   useEffect(() => {
-    if (view === 'day' && dayScrollRef.current) {
-      if (upcomingBookingsForDay.length > 0) {
-        const earliestMins = Math.min(...upcomingBookingsForDay.map((b: any) => b.startHour * 60 + b.startMin));
-        const scrollTarget = Math.max(0, earliestMins - 480);
-        dayScrollRef.current.scrollTo({ top: scrollTarget, behavior: 'smooth' });
-      }
-    }
-  }, [view, currentStr, upcomingBookingsForDay]);
-
-  useEffect(() => {
     if (view === 'week' && weekVerticalScrollRef.current) {
       const weekDatesSet = new Set(weekDays.map(w => w.dateStr));
       const activeWeekBookings = myCalendarBookings.filter((b: any) => weekDatesSet.has(b.date) && !isSlotReleased(b));
       
       if (activeWeekBookings.length > 0) {
         const earliestMins = Math.min(...activeWeekBookings.map((b: any) => b.startHour * 60 + b.startMin));
-        const scrollTarget = Math.max(0, earliestMins - 480);
+        const scrollTarget = Math.max(0, earliestMins - hours[0] * 60);
         weekVerticalScrollRef.current.scrollTo({ top: scrollTarget, behavior: 'smooth' });
       } else {
         weekVerticalScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
@@ -299,7 +308,7 @@ export default function Tab2PersonalSchedule({
                   onClick={(e) => { e.stopPropagation(); handleOpenMonthEndModal(); }}
                   className="bg-amber-600 hover:bg-amber-700 active:scale-95 transition text-white px-2.5 py-1 rounded-xl text-[11px] font-black shadow-xs flex items-center gap-1"
                 >
-                  <span>月底結算逾期</span> ➔
+                  <span>月底結算</span> ➔
                 </button>
               )}
               <span className="text-slate-400 font-bold p-1">{isOverdueExpanded ? '▲' : '▼'}</span>
@@ -316,7 +325,7 @@ export default function Tab2PersonalSchedule({
                     </div>
                   </div>
                   <div className="flex gap-1.5">
-                    <button onClick={() => openRescheduleModal(b)} className="text-[11px] bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg font-bold transition">變更</button>
+                    <button onClick={() => openRescheduleModal(b)} className="text-[11px] bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg font-bold transition">{isUnderReview(b) ? '取消' : '變更'}</button>
                     <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="text-[11px] bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded-lg font-bold transition shadow-xs">補簽</button>
                   </div>
                 </div>
@@ -328,7 +337,7 @@ export default function Tab2PersonalSchedule({
 
       {/* 日曆檢視 */}
       {view === 'day' && (
-        <div ref={dayScrollRef} className={`flex-1 overflow-y-auto bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs space-y-3.5 scroll-smooth ${
+        <div className={`flex-1 overflow-y-auto bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs space-y-3.5 scroll-smooth ${
           isPast ? 'bg-slate-100/70 grayscale' : ''
         }`}>
           <div className="space-y-2.5">
@@ -337,22 +346,24 @@ export default function Tab2PersonalSchedule({
             </p>
             {upcomingBookingsForDay.map((b: any) => (
               <div key={b.id} onClick={() => onSelectStudent(b.studentName)} className="p-3 bg-slate-50 hover:bg-slate-100/80 rounded-2xl border border-slate-200 space-y-2 text-xs cursor-pointer shadow-2xs transition">
-                <div className="flex justify-between items-center font-mono">
+                <div className="flex justify-between items-center gap-2 font-mono">
                   <span className="font-black text-slate-800 text-sm">📅 {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
+                  {roomChangeTag(b.id) || (isPendingApproval(b) && (
+                    <span className="shrink-0 whitespace-nowrap text-[10px] font-sans bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">{reviewTagLabel(b)}</span>
+                  ))}
                 </div>
                 <div className="flex justify-between items-center text-slate-700 font-bold">
                   <div className="flex items-center gap-1.5">
-                    <span className={`w-2.5 h-2.5 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
+                    <span className={`w-2.5 h-2.5 rounded-full ${displayRoom(b) === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                     <span className="font-black text-slate-900 text-sm mr-1">{b.studentName}</span>
                     <span className="text-slate-400">({b.lessonType})</span>
-                    {reviews.some((r: any) => r.bookingId === b.id && r.status === 'pending' && r.reviewType === 'room_change') && (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">
-                        {getReviewHoldLabel(calendarSource.find((x: any) => x.id === b.id && !x.isHold) || b) || '改室審核中'}
-                      </span>
-                    )}
                   </div>
                   <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-                    <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">變更</button>
+                    {isUnderReview(b) ? (
+                      <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1 rounded-xl text-[11px] font-bold border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 transition">取消</button>
+                    ) : (
+                      <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">變更</button>
+                    )}
                     <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="bg-rose-500 hover:bg-rose-600 text-white font-black px-3 py-1 rounded-xl flex items-center gap-1 shadow-xs transition">
                       <PenTool className="w-3.5 h-3.5" /> 簽名
                     </button>
@@ -390,12 +401,13 @@ export default function Tab2PersonalSchedule({
               <div key={b.id} onClick={() => onSelectStudent(b.studentName)} className="p-3 bg-slate-50 rounded-xl space-y-2 text-xs text-slate-600 border border-slate-200 cursor-pointer hover:bg-slate-100 transition shadow-2xs">
                 <div className="flex justify-between items-center font-mono">
                   <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
+                    <span className={`w-2 h-2 rounded-full ${displayRoom(b) === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                     <span className="font-bold">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
                     <span className="font-black text-slate-800 font-sans">{b.studentName}</span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
+                    {roomChangeTag(b.id)}
                     <BookingStatusBadge booking={b} onZoomSignature={setZoomedImage} />
                   </div>
                 </div>
@@ -408,16 +420,16 @@ export default function Tab2PersonalSchedule({
                 )}
                 {b.isSettlementLocked && (
                   <div className="flex items-center justify-between gap-2" onClick={e => e.stopPropagation()}>
-                    <span className="text-[10px] text-slate-500 font-bold">🔒 結算已送出，無法自行撤銷</span>
+                    <span className="text-[10px] text-slate-500 font-bold">🔒 結算已鎖定</span>
                     {reviews.some((r: any) => r.bookingId === b.id && r.reviewType === 'settlement_undo' && r.status === 'pending') ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">更正申請審核中</span>
+                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">更正審核</span>
                     ) : (
                       <button
                         type="button"
                         onClick={() => { setUndoTarget(b); setUndoReason(''); }}
                         className="text-[11px] bg-white border border-slate-300 hover:bg-slate-100 px-2.5 py-1 rounded-lg font-bold transition"
                       >
-                        申請結算更正
+                        結算更正
                       </button>
                     )}
                   </div>
@@ -466,17 +478,18 @@ export default function Tab2PersonalSchedule({
                     {dayNum}
                   </span>
                   {dayBks.map((b: any) => {
-                    const holdLabel = getReviewHoldLabel(b);
+                    const tagLabel = reviewTagLabel(b);
                     return (
                       <div 
                         key={b.id} 
                         onClick={() => onSelectStudent(b.studentName)} 
-                        className={`text-[11px] truncate px-1.5 py-0.5 rounded shadow-2xs cursor-pointer hover:scale-[1.02] transition-transform ${
-                          holdLabel ? 'bg-amber-50 border border-dashed border-amber-400 text-amber-900' : getPersonalBookingStyle(b, 'month')
-                        }`}
-                        title={holdLabel ? `${b.studentName}｜${holdLabel}` : `${b.studentName} (${b.roomType === 'large' ? '大教室' : '小教室'})`}
+                        className={`text-[11px] truncate py-0.5 rounded shadow-2xs cursor-pointer hover:scale-[1.02] transition-transform ${tagLabel ? 'px-0.5' : 'px-1.5'} ${getPersonalBookingStyle(b, 'month')}`}
+                        title={`${b.studentName} (${b.roomType === 'large' ? '大教室' : '小教室'})${tagLabel ? `｜${tagLabel}` : ''}`}
                       >
-                        {holdLabel ? '⏳ ' : ''}{b.studentName}
+                        {b.studentName}
+                        {tagLabel && (
+                          <span className="block whitespace-normal break-words text-balance text-center text-[8px] leading-[10px] tracking-tighter font-sans font-black bg-amber-500 text-white rounded">{tagLabel}</span>
+                        )}
                       </div>
                     );
                   })}
@@ -542,22 +555,19 @@ export default function Tab2PersonalSchedule({
                   ))}
                   {myCalendarBookings.filter((b: any) => b.date === item.dateStr && !isSlotReleased(b)).map((b: any) => {
                     const top = (b.startHour - hours[0]) * 60 + b.startMin;
-                    const holdLabel = getReviewHoldLabel(b);
+                    const tagLabel = reviewTagLabel(b);
                     return (
                       <div
                         key={b.id}
                         onClick={() => onSelectStudent(b.studentName)}
-                        title={holdLabel ? `${b.studentName}｜${holdLabel}` : undefined}
+                        title={tagLabel ? `${b.studentName}｜${tagLabel}` : undefined}
                         style={{ top: `${top}px`, height: `48px` }}
-                        className={`absolute inset-x-0.5 z-10 rounded p-1 flex flex-col justify-center cursor-pointer shadow-2xs select-none transition hover:scale-[1.02] ${
-                          holdLabel ? 'bg-amber-50 border border-dashed border-amber-400 text-amber-950' : getPersonalBookingStyle(b, 'week')
-                        }`}
+                        className={`absolute inset-x-0.5 z-10 rounded ${tagLabel ? 'p-px overflow-hidden' : 'p-1'} flex flex-col justify-center cursor-pointer shadow-2xs select-none transition hover:scale-[1.02] ${getPersonalBookingStyle(b, 'week')}`}
                       >
-                        <span className="text-[12px] font-black truncate text-center leading-tight">{b.studentName}</span>
-                        {holdLabel ? (
-                          <span className="text-[8px] leading-[9px] font-black text-amber-800 text-center break-words mt-0.5">{holdLabel}</span>
-                        ) : (
-                          <span className="text-[10px] font-mono opacity-80 text-center leading-tight mt-0.5">{formatTimeStr(b.startHour, b.startMin)}</span>
+                        <span className={`${tagLabel ? 'text-[10px] leading-[12px]' : 'text-[12px] leading-tight'} font-black truncate text-center`}>{b.studentName}</span>
+                        <span className={`text-[10px] font-mono opacity-80 text-center ${tagLabel ? 'leading-[11px]' : 'leading-tight mt-0.5'}`}>{formatTimeStr(b.startHour, b.startMin)}</span>
+                        {tagLabel && (
+                          <span className="text-[8px] leading-[9px] tracking-tighter font-sans font-black bg-amber-500 text-white rounded text-center break-words text-balance">{tagLabel}</span>
                         )}
                       </div>
                     );
@@ -572,9 +582,10 @@ export default function Tab2PersonalSchedule({
       {/* 變更 / 取消 預約 Modal (共用元件) */}
       <BookingEditModal
         booking={editingBooking}
+        cancelOnly={!!editingBooking && isUnderReview(editingBooking)}
         userRole={userRole}
         systemBaseDate={systemBaseDate}
-        bookings={bookings}
+        bookings={calendarSource}
         businessHours={businessHours}
         priorityGrid={priorityGrid}
         teachers={teachers}
@@ -599,12 +610,12 @@ export default function Tab2PersonalSchedule({
         onClose={() => setZoomedImage(null)}
       />
 
-      {/* 申請結算更正 Modal */}
+      {/* 結算更正 Modal */}
       {undoTarget && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-3 border border-slate-100 text-xs">
             <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-black text-slate-800">申請結算更正 ({undoTarget.studentName})</h3>
+              <h3 className="text-sm font-black text-slate-800">結算更正 ({undoTarget.studentName})</h3>
               <button onClick={() => setUndoTarget(null)} className="p-1 hover:bg-slate-100 rounded-lg text-slate-400"><X className="w-4 h-4" /></button>
             </div>
             <p className="font-mono font-bold text-slate-700">{formatDateWithDay(undoTarget.date)} {formatTimeStr(undoTarget.startHour, undoTarget.startMin)}</p>
@@ -612,12 +623,12 @@ export default function Tab2PersonalSchedule({
               value={undoReason}
               onChange={e => setUndoReason(e.target.value)}
               rows={3}
-              placeholder="請填寫更正事由（必填），送出後由管理員審核..."
+              placeholder={userRole === 'admin' ? '請填寫更正事由（必填），確認後直接生效...' : '請填寫更正事由（必填），送出後由管理員審核...'}
               className="w-full border border-slate-300 rounded-xl p-2 outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
             />
             <div className="flex gap-2">
               <button onClick={() => setUndoTarget(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 py-2.5 rounded-xl font-bold text-slate-600">取消</button>
-              <button onClick={submitUndoRequest} className="flex-1 bg-slate-900 hover:bg-slate-800 text-white py-2.5 rounded-xl font-bold">送出申請</button>
+              <button onClick={submitUndoRequest} className="flex-1 bg-slate-900 hover:bg-slate-800 text-white py-2.5 rounded-xl font-bold">{userRole === 'admin' ? '確認更正' : '送出申請'}</button>
             </div>
           </div>
         </div>
@@ -691,7 +702,7 @@ export default function Tab2PersonalSchedule({
                             : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
                         }`}
                       >
-                        <span className="text-xs font-bold">2. 未取消</span>
+                        <span className="text-xs font-bold">2. 未取消{userRole === 'admin' ? '（免計罰）' : ''}</span>
                         <span className="text-[10px] opacity-75 font-normal">學生沒來忘記取消</span>
                       </button>
                     </div>
@@ -734,7 +745,11 @@ export default function Tab2PersonalSchedule({
             <div className="bg-amber-50/80 p-3 rounded-2xl border border-amber-200 text-amber-900 text-[11px] leading-relaxed shrink-0 space-y-1">
               <p className="font-bold">※ 月底結算規則說明：</p>
               <p>• 選擇「未簽到」：系統自動扣除學生堂數，認列授課鐘點費。</p>
-              <p>• 選擇「未取消」：不扣學生堂數，並累積老師逾期取消次數。</p>
+              {userRole === 'admin' ? (
+                <p>• 選擇「未取消（免計罰）」：不扣學生堂數、不計罰，免送審直接結案。</p>
+              ) : (
+                <p>• 選擇「未取消」：不扣學生堂數，並累積老師逾期取消次數。</p>
+              )}
               <p className="text-rose-700 font-black">
                 • 若月底前未處理，系統將自動結算為「老師逾期取消」。
               </p>

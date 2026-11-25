@@ -12,12 +12,12 @@ import {
 
 import { BookingStatusBadge, CanvasPad, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DEFAULT_BUSINESS_HOURS, getDisplayHours, isBookingOverdue, isOverdueUnsettled, occupiesQuota, matchesStudent, isTaughtBooking, isRuleOffHours } from '../utils/bookingRules';
+import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DEFAULT_BUSINESS_HOURS, getDisplayHours, isBookingOverdue, isOverdueUnsettled, occupiesQuota, matchesStudent, isRuleOffHours, getScheduleQuota } from '../utils/bookingRules';
 import { systemAlert, systemConfirm } from '../utils/systemAlert';
 
 export default function StudentDetailView({ 
-  systemBaseDate,student, onBack, bookings, onUpdateStudent, onPurchase, onSign, onUpdateBookingNote, onAddBookings, onExecuteReschedule, onSmartBook, showToast, addLog, currentUserId, teachers, userRole,
-  students, businessHours, priorityGrid,
+  systemBaseDate,student, onBack, bookings, calendarBookings, onUpdateStudent, onPurchase, onSign, onUpdateBookingNote, onAddBookings, onExecuteReschedule, onSmartBook, showToast, addLog, currentUserId, teachers, userRole,
+  students, businessHours, priorityGrid, getPriorityHint,
   externalBuyModalOpen, setExternalBuyModalOpen
 }: any) {
   const [expandHistory, setExpandHistory] = useState(false);
@@ -84,13 +84,11 @@ export default function StudentDetailView({
   const isCreditsOverdrawn = occupiedQuotaCount > student.credits;
   const overdrawnCount = occupiedQuotaCount - student.credits;
 
-  // 自動排課額度明細：A 剩餘 / B 歷史簽到 / C 逾期紀錄 / D 已預排 / E 剩餘可排（皆由 bookings 即時衍生）
-  const quotaA = student.credits;
-  const quotaB = studentBookings.filter(isTaughtBooking).length;
-  const quotaC = studentBookings.filter((b: any) => isOverdueUnsettled(b, systemBaseDate)).length;
-  const quotaD = studentBookings.filter((b: any) => occupiesQuota(b) && !isBookingOverdue(b.date, systemBaseDate)).length;
-  const quotaE = Math.max(0, quotaA - (quotaC + quotaD));
-  const quotaReplace = Math.max(0, quotaA - quotaC);
+  // 排課 / 衝堂用課表：含改室審核衍生資料（新教室佔位、原教室釋出）
+  const scheduleSource = calendarBookings || bookings;
+  // 自動排課額度明細（歷史簽到已於簽到當下扣堂，不重複扣除）
+  const quota = getScheduleQuota(scheduleSource, student, systemBaseDate);
+  const roomChangeIds = new Set(scheduleSource.filter((b: any) => b.roomChangePending).map((b: any) => b.id));
 
   const effectiveBusinessHours = businessHours || DEFAULT_BUSINESS_HOURS;
 
@@ -155,6 +153,21 @@ export default function StudentDetailView({
     if (ok) setIsQuickBookModalOpen(false);
   };
 
+  // 臨時預約彈窗：他人優先時段即時提示
+  const quickBookPriorityHint: string | null = isQuickBookModalOpen
+    ? getPriorityHint?.({
+        date: quickBookForm.date,
+        startHour: parseInt(quickBookForm.hour, 10),
+        startMin: parseInt(quickBookForm.minute, 10),
+        durationMins: 50,
+        teacherId: currentUserId,
+        studentId: student.id,
+        studentName: student.name,
+        roomType: quickBookForm.roomType,
+        lessonType: quickBookForm.lessonType,
+      }) ?? null
+    : null;
+
   // 續課簽署確認
   const handleConfirmPurchase = (studentSignUrl: string) => {
     const newPurchase = {
@@ -190,26 +203,26 @@ export default function StudentDetailView({
   const horizonWarning = useMemo(() => {
     if (!autoScheduleOpen || userRole === 'admin' || student.credits <= 0) return false;
     try {
-      const engine = new ScheduleEngine(bookings, teachers, Object.fromEntries([[student.id, student]]));
+      const engine = new ScheduleEngine(scheduleSource, teachers, Object.fromEntries([[student.id, student]]));
       return (['append_remaining', 'replace_future'] as const).some(mode => {
         const r = engine.generateSchedule({
           sid: student.id, sName: student.name, teacherId: student.teacherId,
           credits: student.credits, slots: student.rules, startFromDate: todayStr, todayStr,
           businessHours: businessHours || DEFAULT_BUSINESS_HOURS, priorityGrid: priorityGrid || {},
           userRole, mode, maxWeeksLimit: 16,
-          targetCount: mode === 'append_remaining' ? quotaE : quotaReplace
+          targetCount: mode === 'append_remaining' ? quota.availableToSchedule : quota.replaceTotal
         });
         return !!r.hitHorizonLimit;
       });
     } catch { return false; }
-  }, [autoScheduleOpen, userRole, student, bookings, teachers, todayStr, businessHours, priorityGrid, quotaE, quotaReplace]);
+  }, [autoScheduleOpen, userRole, student, scheduleSource, teachers, todayStr, businessHours, priorityGrid, quota.availableToSchedule, quota.replaceTotal]);
 
   // 執行自動排課（支援模式：'append_remaining' 接續排課 或 'replace_future' 重整未來）
   const handleRunAutoSchedule = async (mode: 'append_remaining' | 'replace_future', startFromToday: boolean = true) => {
     if (student.credits <= 0) return systemAlert('學員剩餘堂數不足，請先購買續課');
 
     const engine = new ScheduleEngine(
-      bookings, 
+      scheduleSource, 
       teachers, 
       Object.fromEntries([[student.id, student]])
     );
@@ -229,13 +242,17 @@ export default function StudentDetailView({
       userRole,
       mode,
       maxWeeksLimit: 16,
-      targetCount: mode === 'append_remaining' ? quotaE : quotaReplace
+      targetCount: mode === 'append_remaining' ? quota.availableToSchedule : quota.replaceTotal
     });
 
     if (result.success) {
-      // 實際有非營業時間課堂以待審排入（僅一般老師；管理員直接生效）時才確認，與實際排入行為一致
-      if ((result.afterHoursCount ?? 0) > 0) {
-        if (!await systemConfirm('此時段為非營業時間，排入後需經管理員審核，是否繼續進行排課？')) return;
+      // 實際有課堂以待審排入（僅一般老師；管理員直接生效）時才確認，與實際排入行為一致
+      const pendingKinds = [
+        (result.afterHoursCount ?? 0) > 0 ? '非營業時間' : '',
+        (result.nonPriorityCount ?? 0) > 0 ? '其他老師的優先時段' : '',
+      ].filter(Boolean).join('或');
+      if (pendingKinds) {
+        if (!await systemConfirm(`此時段為${pendingKinds}，排入後需經管理員審核，是否繼續進行排課？`)) return;
       }
       // 依據引擎判斷，保留安全保護區（已簽到、已逾期、已取消），僅替換或追加純預約
       const cleanBookings = bookings.filter((b: any) => !result.removedBookingIds.includes(b.id));
@@ -363,9 +380,12 @@ export default function StudentDetailView({
                   <span className={`w-2.5 h-2.5 rounded-full shadow-2xs ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                   <span className="font-black text-slate-800 font-mono text-sm">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
                   <span className="text-slate-400 font-bold text-[11px]">({b.lessonType})</span>
+                  {roomChangeIds.has(b.id) && (
+                    <span className="shrink-0 whitespace-nowrap text-[10px] bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">改室審核</span>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">變更</button>
+                  <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">{userRole !== 'admin' && roomChangeIds.has(b.id) ? '取消' : '變更'}</button>
                   <button onClick={() => setSignModalId({ id: b.id, studentName: student.name })} className="bg-rose-500 hover:bg-rose-600 transition text-white px-3 py-1.5 rounded-xl font-black text-[11px] flex items-center gap-1 shadow-xs"><PenTool className="w-3 h-3"/> 簽名</button>
                 </div>
               </div>
@@ -411,7 +431,7 @@ export default function StudentDetailView({
                     <span className="ml-2 text-xs text-slate-500 font-sans">{b.roomType === 'large' ? '大教室' : '小教室'} ({b.lessonType})</span>
                   </div>
                   <div className="flex gap-1.5">
-                    <button onClick={() => openRescheduleModal(b)} className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold transition">變更</button>
+                    <button onClick={() => openRescheduleModal(b)} className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold transition">{userRole !== 'admin' && roomChangeIds.has(b.id) ? '取消' : '變更'}</button>
                     <button onClick={() => setSignModalId(b.id)} className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-xl font-bold transition shadow-xs">補簽</button>
                   </div>
                 </div>
@@ -572,6 +592,12 @@ export default function StudentDetailView({
               </div>
             </div>
 
+            {quickBookPriorityHint && (
+              <div className="rounded-2xl border-2 border-rose-400 bg-rose-50 p-3 font-black text-rose-700 leading-relaxed">
+                {quickBookPriorityHint}
+              </div>
+            )}
+
             <div className="pt-2 flex gap-2">
               <button 
                 onClick={() => setIsQuickBookModalOpen(false)} 
@@ -593,9 +619,10 @@ export default function StudentDetailView({
       {/* 變更 / 取消預約 Modal (共用元件) */}
       <BookingEditModal
         booking={editingBooking}
+        cancelOnly={userRole !== 'admin' && !!editingBooking && roomChangeIds.has(editingBooking.id)}
         userRole={userRole}
         systemBaseDate={systemBaseDate || todayStr}
-        bookings={bookings}
+        bookings={scheduleSource}
         studentName={student.name}
         businessHours={businessHours}
         priorityGrid={priorityGrid}
@@ -886,27 +913,31 @@ export default function StudentDetailView({
                 </div>
               )}
 
-              {/* 堂數明細：A / B / C / D / E */}
+              {/* 堂數明細 */}
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-1.5 font-mono">
                 <div className="flex justify-between text-slate-700">
                   <span>學生剩餘：</span>
-                  <span className="font-black text-rose-600 text-sm">{quotaA} 堂</span>
+                  <span className="font-black text-rose-600 text-sm">{quota.totalRemaining} 堂</span>
                 </div>
-                <div className="flex justify-between text-slate-500 text-[11px]">
-                  <span>1. 歷史簽到：</span>
-                  <span className="font-bold text-slate-700">{quotaB} 堂</span>
+                <div className="flex justify-between gap-2 text-slate-500 text-[11px]">
+                  <span>1. 歷史簽到：<span className="block text-[10px] text-slate-400 font-sans">僅顯示紀錄參考，不重複扣除</span></span>
+                  <span className="font-bold text-slate-700 shrink-0">{quota.signedCount} 堂</span>
                 </div>
                 <div className="flex justify-between text-slate-500 text-[11px]">
                   <span>2. 逾期紀錄：</span>
-                  <span className="font-bold text-slate-700">{quotaC} 堂</span>
+                  <span className="font-bold text-slate-700">{quota.overdueCount} 堂</span>
                 </div>
                 <div className="flex justify-between text-slate-500 text-[11px]">
-                  <span>3. 已經預排：</span>
-                  <span className="font-bold text-indigo-600">{quotaD} 堂</span>
+                  <span>3. 待審核預約：</span>
+                  <span className="font-bold text-amber-600">{quota.pendingCount} 堂</span>
+                </div>
+                <div className="flex justify-between text-slate-500 text-[11px]">
+                  <span>4. 已經預排：</span>
+                  <span className="font-bold text-indigo-600">{quota.confirmedFutureCount} 堂</span>
                 </div>
                 <div className="flex justify-between text-slate-700 text-[11px] border-t border-slate-200 pt-1.5">
-                  <span>4. 剩餘可排 (A-(C+D))：</span>
-                  <span className="font-black text-emerald-600">{quotaE} 堂</span>
+                  <span>5. 剩餘可排：</span>
+                  <span className="font-black text-emerald-600">{quota.availableToSchedule} 堂</span>
                 </div>
               </div>
 
@@ -921,7 +952,10 @@ export default function StudentDetailView({
                           <span className={`w-1.5 h-1.5 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                           {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}
                         </span>
-                        <span className="text-slate-400 font-sans font-bold">({b.lessonType})</span>
+                        <span className="text-slate-400 font-sans font-bold">
+                          {roomChangeIds.has(b.id) && <span className="text-amber-600 mr-1">改室審核</span>}
+                          ({b.lessonType})
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -946,9 +980,9 @@ export default function StudentDetailView({
                 onClick={() => handleRunAutoSchedule('append_remaining')}
                 className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold transition shadow-xs text-left px-3.5 flex flex-col"
               >
-                <span className="text-xs font-black">1. 接續順延排課 {quotaE} 堂</span>
+                <span className="text-xs font-black">1. 接續順延排課 {quota.availableToSchedule} 堂</span>
                 <span className="text-[10px] text-indigo-100 font-normal">
-                  保留原本的 {quotaD} 堂課，把剩下的 {quotaE} 堂往後接續排完
+                  保留原本的 {quota.pendingCount + quota.confirmedFutureCount} 堂課，把剩下的 {quota.availableToSchedule} 堂往後接續排完
                 </span>
               </button>
 
@@ -957,9 +991,9 @@ export default function StudentDetailView({
                 onClick={() => handleRunAutoSchedule('replace_future')}
                 className="w-full bg-slate-800 hover:bg-slate-700 text-white py-2.5 rounded-xl font-bold transition shadow-xs text-left px-3.5 flex flex-col"
               >
-                <span className="text-xs font-black">2. 全部重新排課 A-C = {quotaReplace} 堂</span>
+                <span className="text-xs font-black">2. 全部重新排課 {quota.replaceTotal} 堂</span>
                 <span className="text-[10px] text-slate-300 font-normal">
-                  清空還沒上的課，從今天開始重新排滿 {quotaReplace} 堂
+                  清空還沒上的課（待審核課堂保留），從今天開始重新排滿 {quota.replaceTotal} 堂
                 </span>
               </button>
 
@@ -991,6 +1025,13 @@ export default function StudentDetailView({
             <div className="p-2.5 bg-indigo-50 border border-indigo-100 rounded-xl text-indigo-900 font-bold leading-tight">
               {scheduleResultModal.message}
             </div>
+
+            {((scheduleResultModal.afterHoursCount ?? 0) + (scheduleResultModal.nonPriorityCount ?? 0)) > 0 && (
+              <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
+                ⏳ 其中 {(scheduleResultModal.afterHoursCount ?? 0) + (scheduleResultModal.nonPriorityCount ?? 0)} 堂需經管理員審核
+                （非營業審核 {scheduleResultModal.afterHoursCount ?? 0} 堂、非優先審核 {scheduleResultModal.nonPriorityCount ?? 0} 堂），核准前標示為待審核。
+              </div>
+            )}
 
             {(scheduleResultModal.remainingUnscheduled ?? 0) > 0 && (
               <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
