@@ -2,7 +2,7 @@
 import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
-import { calculateFreeCancelQuota, isTaughtBooking } from '../utils/bookingRules';
+import { calculateFreeCancelQuota, isTaughtBooking, getLogSeverity, getReviewTypeLabel } from '../utils/bookingRules';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -25,6 +25,7 @@ export default function Tab5RulesAndAudit({
 }: any) {
   const [slotModal, setSlotModal] = useState<string | null>(null);
   const [expandLogs, setExpandLogs] = useState(false);
+  const [severityFilter, setSeverityFilter] = useState<'all' | 'red' | 'yellow' | 'gray'>('all');
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [noticeCardOpen, setNoticeCardOpen] = useState(true);
   const [expandedLogIds, setExpandedLogIds] = useState<Record<string, boolean>>({});
@@ -54,10 +55,19 @@ export default function Tab5RulesAndAudit({
     });
   }, [logs, userRole, currentUserId]);
 
-  // 判定是否為需要已讀確認的通知（僅限「系統調度」與「改室」）
-  const isRoomSwapNotice = (l: any) => {
-    return l.typeStr === '調度' || l.typeStr === '改室';
-  };
+  // 需要已讀確認的通知：黃色 / 紅色（灰階一般紀錄不計未讀、不顯示已讀切換）
+  const isRoomSwapNotice = (l: any) => getLogSeverity(l) !== 'gray';
+
+  const severityCounts = useMemo(() => {
+    const c = { all: displayLogs.length, red: 0, yellow: 0, gray: 0 };
+    displayLogs.forEach((l: any) => { c[getLogSeverity(l)]++; });
+    return c;
+  }, [displayLogs]);
+
+  const filteredLogs = useMemo(
+    () => severityFilter === 'all' ? displayLogs : displayLogs.filter((l: any) => getLogSeverity(l) === severityFilter),
+    [displayLogs, severityFilter]
+  );
 
   // 僅針對「調度」或「改室」計算未讀紅點數量，管理者審核案件不佔用未讀紅點
   const unreadCount = useMemo(() => {
@@ -87,7 +97,14 @@ export default function Tab5RulesAndAudit({
 
   const updateDayHours = (key: 'weekday' | 'saturday' | 'sunday', patch: any) => {
     if (userRole !== 'admin' || !setBusinessHours || !businessHours) return;
-    setBusinessHours({ ...businessHours, [key]: { ...businessHours[key], ...patch } });
+    const prev = businessHours[key];
+    const next = { ...prev, ...patch };
+    const name = key === 'weekday' ? '週一至週五' : key === 'saturday' ? '週六' : '週日';
+    const fmt = (c: any) => (c.enabled ? `${String(c.startHour).padStart(2, '0')}:00–${String(c.endHour).padStart(2, '0')}:00` : '公休');
+    if (fmt(prev) !== fmt(next)) {
+      addLog?.(`營業時間設定修改\n${name}：${fmt(prev)} ➔ ${fmt(next)}`, '設定', 'gray', '', currentUserId, undefined, undefined, userRole === 'admin' ? 'Daisy' : undefined);
+    }
+    setBusinessHours({ ...businessHours, [key]: next });
   };
 
   const toggleReviewExpand = (id: string) => {
@@ -187,7 +204,7 @@ export default function Tab5RulesAndAudit({
                             ? 'bg-purple-50 text-purple-700 border border-purple-200' 
                             : 'bg-rose-50 text-rose-700 border border-rose-200'
                         }`}>
-                          {isRoomChange ? '改室' : item.reviewType === 'reschedule' ? '改期' : item.reviewType === 'settlement_undo' ? '結算更正' : item.reviewType === 'after_hours' ? '非營業時間' : '取消'}
+                          {isRoomChange ? '改室' : getReviewTypeLabel(item)}
                         </span>
                         {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-slate-400 ml-0.5" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-0.5" />}
                       </div>
@@ -243,6 +260,9 @@ export default function Tab5RulesAndAudit({
                     {isExpanded ? (
                       <div className="p-2.5 bg-slate-50 rounded-xl text-xs text-slate-700 space-y-2 border border-slate-100 animate-in fade-in duration-150">
                         <p className="font-medium"><span className="text-slate-400 font-sans">事由：</span>{item.reason}</p>
+                        {item.submittedAt && (
+                          <p className="font-medium"><span className="text-slate-400 font-sans">送審時間：</span><span className="font-mono">{item.submittedAt}</span></p>
+                        )}
                         
                         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-800 pt-1 border-t border-slate-200/60">
                           {/* 原課堂資訊（帶完整教室名稱） */}
@@ -277,6 +297,20 @@ export default function Tab5RulesAndAudit({
                             </div>
                           )}
 
+                          {item.reviewType === 'after_hours' && item.batchBookingIds && item.batchBookingIds.length > 0 && (
+                            <div className="w-full font-sans text-slate-700 space-y-0.5">
+                              <div className="text-slate-400">批次課堂（核准 / 駁回整批一次套用）：</div>
+                              {(bookings as any[])
+                                .filter(b => item.batchBookingIds.includes(b.id))
+                                .sort((a, b) => a.date.localeCompare(b.date) || (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin))
+                                .map(b => (
+                                  <div key={b.id} className="font-mono text-[11px]">
+                                    {b.roomType === 'large' ? '🟣' : '🟢'} {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)} ({b.lessonType})
+                                  </div>
+                                ))}
+                            </div>
+                          )}
+
                           {item.reviewType === 'after_hours' && (
                             <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
                               <span className="text-slate-400">類型：</span>
@@ -299,6 +333,9 @@ export default function Tab5RulesAndAudit({
                         className="text-[11px] text-slate-500 truncate cursor-pointer hover:text-slate-700 pl-1"
                       >
                         {item.reason}
+                        {item.submittedAt && (
+                          <span className="block text-[10px] text-slate-400 font-mono">送審時間：{item.submittedAt}</span>
+                        )}
                       </div>
                     )}
                   </div>
@@ -378,12 +415,31 @@ export default function Tab5RulesAndAudit({
 
         {noticeCardOpen && (
           <div className="space-y-2 animate-in fade-in duration-150">
-            {displayLogs.length === 0 && (
+            {/* 三級分類篩選：全部 / 紅色重要 / 黃色提醒 / 灰階一般 */}
+            <div className="flex flex-wrap gap-1.5 text-[11px] font-bold">
+              {([
+                ['all', '全部', 'bg-slate-800 text-white border-slate-800', 'bg-white text-slate-600 border-slate-200'],
+                ['red', '🔴 紅色重要', 'bg-rose-500 text-white border-rose-500', 'bg-rose-50 text-rose-700 border-rose-200'],
+                ['yellow', '🟡 黃色提醒', 'bg-amber-500 text-white border-amber-500', 'bg-amber-50 text-amber-700 border-amber-200'],
+                ['gray', '⚪ 灰階一般', 'bg-slate-500 text-white border-slate-500', 'bg-slate-50 text-slate-600 border-slate-200'],
+              ] as const).map(([key, label, on, off]) => (
+                <button
+                  key={key}
+                  onClick={() => { setSeverityFilter(key); setExpandLogs(false); }}
+                  className={`px-2.5 py-1 rounded-full border transition shadow-2xs ${severityFilter === key ? on : off}`}
+                >
+                  {label} {severityCounts[key]}
+                </button>
+              ))}
+            </div>
+
+            {filteredLogs.length === 0 && (
               <p className="text-center text-slate-300 py-4 font-bold font-sans">無相關通知紀錄</p>
             )}
             
-            {displayLogs.slice(0, expandLogs ? displayLogs.length : 5).map((l: any) => {
-              const isNormal = l.category === 'normal';
+            {filteredLogs.slice(0, expandLogs ? filteredLogs.length : 5).map((l: any) => {
+              const severity = getLogSeverity(l);
+              const isNormal = severity === 'gray';
               const isExpanded = !!expandedLogIds[l.id];
               const { teacherClean, studentClean } = getCleanNames(l);
               const detailContent = l.detail || l.action;
@@ -395,7 +451,7 @@ export default function Tab5RulesAndAudit({
                   className={`p-2.5 rounded-2xl border transition cursor-pointer ${
                     isNormal 
                       ? 'bg-slate-50 border-slate-200 hover:bg-slate-100/70' 
-                      : l.category === 'red' 
+                      : severity === 'red' 
                         ? 'bg-rose-50/80 border-rose-200 hover:bg-rose-100/60' 
                         : 'bg-amber-50/80 border-amber-200 hover:bg-amber-100/60'
                   } ${
@@ -406,8 +462,8 @@ export default function Tab5RulesAndAudit({
                   <div className="flex justify-between items-center text-[11px] gap-2">
                     <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0 flex-1 font-mono">
                       <span className={`w-2 h-2 rounded-full shrink-0 shadow-2xs ${
-                        l.category === 'red' ? 'bg-rose-500' : 
-                        l.category === 'yellow' ? 'bg-amber-500' : 
+                        severity === 'red' ? 'bg-rose-500' : 
+                        severity === 'yellow' ? 'bg-amber-500' : 
                         'bg-slate-400'
                       }`} />
                       <span className="text-slate-400 text-[10px] shrink-0">{l.time}</span>
@@ -463,12 +519,12 @@ export default function Tab5RulesAndAudit({
               );
             })}
 
-            {displayLogs.length > 5 && (
+            {filteredLogs.length > 5 && (
               <button 
                 onClick={() => setExpandLogs(!expandLogs)} 
                 className="w-full text-center py-2 text-slate-400 hover:text-slate-600 font-bold text-[11px] bg-white border border-slate-100 rounded-xl shadow-2xs transition mt-1"
               >
-                {expandLogs ? '收合紀錄 ▲' : `展開其餘通知 (${displayLogs.length - 5} 筆) ▼`}
+                {expandLogs ? '收合紀錄 ▲' : `展開其餘通知 (${filteredLogs.length - 5} 筆) ▼`}
               </button>
             )}
           </div>
@@ -711,6 +767,7 @@ export default function Tab5RulesAndAudit({
                 onClick={() => {
                   const lVal = (document.getElementById('assign-large') as HTMLSelectElement).value;
                   const sVal = (document.getElementById('assign-small') as HTMLSelectElement).value;
+                  addLog?.(`優先時段設定修改\n${slotModal}：大教室 ${teachers[lVal]?.name || '無'}、小教室 ${teachers[sVal]?.name || '無'}`, '設定', 'gray', '', currentUserId, undefined, undefined, 'Daisy');
                   setPriorityGrid((prev: any) => ({ 
                     ...prev, 
                     [slotModal]: { large: lVal || undefined, small: sVal || undefined } 

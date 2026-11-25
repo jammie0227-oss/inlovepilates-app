@@ -111,7 +111,7 @@ export class ScheduleEngine {
     priorityGrid: PriorityGrid;
     roomType: 'large' | 'small';
   }): string | null {
-    if (!isWithinBusinessHours(dateStr, h, m, businessHours, 50)) return '公休或非營業時間';
+    // 非營業時間 / 週日公休不再略過（方案 B）：照常排入，一般老師以待審狀態送審、管理員直接生效
     if (userRole !== 'admin') {
       const ahead = diffDays(dateStr, todayStr);
       if (ahead > 90) return '超過 90 天預約上限';
@@ -137,7 +137,8 @@ export class ScheduleEngine {
     priorityGrid = {},
     userRole = 'teacher',
     mode = 'replace_future', // 'append_remaining' (接續排課) 或 'replace_future' (重整未來)
-    maxWeeksLimit = 16
+    maxWeeksLimit = 16,
+    targetCount
   }: {
     sid: string;
     sName: string;
@@ -152,6 +153,8 @@ export class ScheduleEngine {
     userRole?: 'admin' | 'teacher';
     mode?: 'append_remaining' | 'replace_future';
     maxWeeksLimit?: number;
+    /** 指定本次要新排的堂數（A/B/C/D/E 算式）；未提供時以 credits - 已佔額度 計算 */
+    targetCount?: number;
   }): ScheduleEngineResult {
     // 1. 底線防護：嚴禁預排過去日期（起始日若早於基準日，強制校正為基準日）
     const effectiveStartDate = startFromDate < todayStr ? todayStr : startFromDate;
@@ -202,11 +205,13 @@ export class ScheduleEngine {
     ).length;
 
     // 計算本次實際能新增預排的堂數上限（總堂數永不溢出）
-    let remainingToSchedule = credits - preservedFutureCount;
+    let remainingToSchedule = targetCount !== undefined ? targetCount : credits - preservedFutureCount;
     if (remainingToSchedule <= 0) {
       return {
         success: false,
-        message: `既有排課已佔用 ${preservedFutureCount} 堂，已達可用堂數上限 (${credits} 堂)，無需再預排`,
+        message: targetCount !== undefined
+          ? '剩餘可排堂數為 0，無需再預排'
+          : `既有排課已佔用 ${preservedFutureCount} 堂，已達可用堂數上限 (${credits} 堂)，無需再預排`,
         copyText: '',
         newRecords: [],
         removedBookingIds: [],
@@ -259,8 +264,14 @@ export class ScheduleEngine {
         const m = parseInt(mStr, 10);
         const lType = slot.lessonType || '1v1';
         let rType = slot.roomType || (lType === '1v2' ? 'large' : 'small');
+        if (lType === '1v2') rType = 'large'; // 小教室嚴禁排入 1v2
 
-        // 3.5 自動跳過：公休/非營業時間、超過 90 天、他人優先時段（管理員不受 90 天與優先時段限制）
+        // 3.5 自動跳過：超過 90 天、他人優先時段（管理員不受限）；非營業時間不跳過，改依角色排入或送審
+        const isOffHours = !isWithinBusinessHours(dateStr, h, m, businessHours, 50);
+        const offHoursPatch: Pick<BookingItem, 'status'> & Partial<BookingItem> =
+          isOffHours && userRole !== 'admin'
+            ? { status: 'special_pending', pendingKind: 'after_hours' }
+            : { status: 'confirmed' };
         const skipReason = this.getSlotSkipReason({
           dateStr, h, m, teacherId, userRole, todayStr, businessHours, priorityGrid, roomType: rType,
         });
@@ -304,7 +315,7 @@ export class ScheduleEngine {
             studentId: sid,
             roomType: rType,
             lessonType: lType,
-            status: 'confirmed',
+            ...offHoursPatch,
             signed: false,
             isAuto: true
           });
@@ -326,7 +337,7 @@ export class ScheduleEngine {
                 date: dateStr, startHour: h, startMin: m, durationMins: 50,
                 teacherId, studentName: sName, studentId: sid,
                 roomType: altRoom, lessonType: lType,
-                status: 'confirmed', signed: false, isAuto: true
+                ...offHoursPatch, signed: false, isAuto: true
               });
               remainingToSchedule--;
               suggestedRoomSwaps.push({
@@ -361,6 +372,7 @@ export class ScheduleEngine {
     return {
       success: true,
       scheduledCount: newRecords.length,
+      afterHoursCount: newRecords.filter(b => b.status === 'special_pending').length,
       remainingUnscheduled: remainingToSchedule,
       hitHorizonLimit,
       message: `已順利預排 ${newRecords.length} 堂課${skippedReasons.length > 0 ? ` (自動略過 ${skippedReasons.length} 處不可排時段)` : ''}`,
@@ -454,6 +466,9 @@ export class ScheduleEngine {
           dateStr, h, m, teacherId, userRole, todayStr, businessHours, priorityGrid, roomType: rType,
         })) continue;
 
+        // 規則本身設定在非營業時間者可排入：一般老師待審、管理員直接生效
+        const isOffHours = !isWithinBusinessHours(dateStr, h, m, businessHours, 50);
+
         const conflict = checkGlobalConflict({
           dateStr,
           startHour: h,
@@ -481,7 +496,9 @@ export class ScheduleEngine {
               studentId: sid,
               roomType: rType,
               lessonType: lType,
-              status: 'confirmed',
+              ...(isOffHours && userRole !== 'admin'
+                ? { status: 'special_pending' as const, pendingKind: 'after_hours' as const }
+                : { status: 'confirmed' as const }),
               signed: false,
               isAuto: true
             }
@@ -493,7 +510,7 @@ export class ScheduleEngine {
 
     return {
       postponedBooking: null,
-      alertMsg: `已取消課堂，因延後排程已超過 3 個月（90天）有效預排期限，系統未自動補排，請手動安排！`
+      alertMsg: userRole === 'admin' ? undefined : '⚠️ 無法順延排課，因為場租老師預排課程不能超過三個月（管理員無此限制）'
     };
   }
 }

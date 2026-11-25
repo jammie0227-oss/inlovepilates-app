@@ -4,6 +4,8 @@ import { genId } from './id';
 // 對應 REFACTOR_SPEC.md 第二、三節
 // ==========================================
 import type {
+  AuditLogItem,
+  ReviewItem,
   BookingItem,
   BusinessHoursConfig,
   StudentItem,
@@ -126,7 +128,8 @@ export const isFutureLesson = (
  * 取消（含 24H 內送審取消）與學員堂數完全脫鉤：special_pending 的 late_change 不佔額度。
  * 注意：此函式只回答「額度」；是否可簽到 / 改期 / 結算請用 isActionableBooking。
  */
-export const occupiesQuota = (b: Pick<BookingItem, 'status' | 'signed' | 'pendingKind'>): boolean =>
+export const occupiesQuota = (b: Pick<BookingItem, 'status' | 'signed' | 'pendingKind' | 'isHold'>): boolean =>
+  !b.isHold &&
   (b.status === 'confirmed' || (b.status === 'special_pending' && b.pendingKind === 'after_hours')) && !b.signed;
 
 /** 可被老師操作的有效課堂：confirmed、未簽、未結算鎖定（簽到 / 改期 / 取消 / 結算的狀態防護）。 */
@@ -152,9 +155,60 @@ export const matchesStudent = (
 ): boolean => (studentId ? s.id === studentId : !!studentName && s.name === studentName);
 
 /**
- * 是否已釋出空位：一般取消、免罰、計罰，以及 special_pending（審核中絕不卡時段）。
+ * 是否已釋出空位：一般取消、免罰、計罰，以及 24H 內異動/取消待審（special_pending / late_change）。
+ * 例外：非營業時間預約待審（pendingKind === 'after_hours'）會卡住時段，駁回後才釋出。
  */
-export const isCancelledBooking = (status: string): boolean => isCancelledSlot(status);
+export const isCancelledBooking = (status: string, pendingKind?: string): boolean =>
+  isCancelledSlot(status, pendingKind);
+
+/** 以整筆課堂判斷是否已釋出空位（日曆渲染與衝堂檢測共用） */
+export const isSlotReleased = (b: Pick<BookingItem, 'status' | 'pendingKind'>): boolean =>
+  isCancelledSlot(b.status, b.pendingKind);
+
+// ------------------------------------------
+// 審核期間的卡位 (after_hours 預約 / room_change 改室)
+// ------------------------------------------
+
+/**
+ * 依「待審的改教室申請 (room_change)」衍生佔位資料：
+ *  - 原課堂維持原教室並標記 roomChangePending
+ *  - 同時在目標教室產生一筆不可操作的佔位 (isHold)，審核期間兩間教室都被卡住
+ * 核准（原課堂搬到新教室）、駁回或撤回後，因審核單不再是 pending，佔位自然消失。
+ * 回傳值僅供「衝堂檢測 / 日曆顯示」使用，不可寫回課堂資料或用於額度、結算計算。
+ */
+export const applyPendingHolds = (
+  bookings: BookingItem[],
+  reviews: { id: string; bookingId?: string; status: string; reviewType?: string; reqRoom?: 'large' | 'small' }[],
+): BookingItem[] => {
+  const pending = reviews.filter(
+    r => r.status === 'pending' && r.reviewType === 'room_change' && r.bookingId && r.reqRoom,
+  );
+  if (pending.length === 0) return bookings;
+  const byBooking = new Map(pending.map(r => [r.bookingId as string, r]));
+  const result: BookingItem[] = [];
+  const holds: BookingItem[] = [];
+  for (const b of bookings) {
+    const rev = byBooking.get(b.id);
+    if (rev && b.status === 'confirmed' && !b.signed && rev.reqRoom && rev.reqRoom !== b.roomType) {
+      const marker = { from: b.roomType, to: rev.reqRoom };
+      result.push({ ...b, roomChangePending: marker });
+      holds.push({ ...b, id: `hold-${rev.id}`, roomType: rev.reqRoom, isHold: true, holdOf: b.id, roomChangePending: marker });
+    } else {
+      result.push(b);
+    }
+  }
+  return [...result, ...holds];
+};
+
+/** 審核卡位標籤（日曆卡片顯示用）；無審核卡位時回傳 null */
+export const getReviewHoldLabel = (b: BookingItem): string | null => {
+  if (b.roomChangePending) {
+    const name = (r: 'large' | 'small') => (r === 'large' ? '大教室' : '小教室');
+    return `改室審核中（${name(b.roomChangePending.from)} ➔ ${name(b.roomChangePending.to)}）`;
+  }
+  if (b.status === 'special_pending' && b.pendingKind === 'after_hours') return '審核中（非營業時間）';
+  return null;
+};
 
 // ------------------------------------------
 // 教室分配 (情境 A / B + 大教室自動讓位；1v2 絕不排小教室)
@@ -192,7 +246,9 @@ const timeLabel = (h: number, m: number) => `${String(h).padStart(2, '0')}:${Str
 
 /** 時段內仍有效（未釋出）的課堂 */
 const liveBookings = (existing: BookingItem[], excludeBookingId?: string) =>
-  existing.filter(b => !isCancelledBooking(b.status) && (!excludeBookingId || b.id !== excludeBookingId));
+  existing.filter(
+    b => !isSlotReleased(b) && (!excludeBookingId || (b.id !== excludeBookingId && b.holdOf !== excludeBookingId)),
+  );
 
 /**
  * 被移動的舊 1v1 能否安全搬進小教室：以「它自己完整的 50 分鐘區間」檢查
@@ -273,7 +329,9 @@ export const resolveRoomAssignment = ({
   // 大教室智慧讓位：所有重疊課堂都是「有效、未簽」的 1v1，且每一堂都能以自己完整 50 分鐘區間
   // 搬進小教室（小教室、任課老師、學員皆無衝堂）。任何一堂不行就整體放棄讓位（不可局部移動）。
   const yieldable =
-    largeBusy.every(b => b.lessonType === '1v1' && b.status === 'confirmed' && !b.signed) &&
+    largeBusy.every(
+      b => b.lessonType === '1v1' && b.status === 'confirmed' && !b.signed && !b.isHold && !b.roomChangePending,
+    ) &&
     largeBusy.every(b => canRelocateToSmall(b, existingBookings, excludeBookingId));
   if (yieldable) {
     const autoSwaps: AutoSwapItem[] = largeBusy.map(moved => ({
@@ -314,6 +372,8 @@ export type TimeConstraintCode =
   | 'after_hours';
 
 export interface TimeConstraintResult {
+  /** 管理員於開課前 10 分鐘內（含已開課 / 過去時段）預約：允許，但須提醒「將直接寫入課表」 */
+  urgent?: boolean;
   /** 是否可繼續（after_hours 對老師為 true 但需送審） */
   allowed: boolean;
   /** 非營業時間：一般老師須填事由、建立 special_pending 並送 after_hours 審核單 */
@@ -344,6 +404,20 @@ export const isWithinBusinessHours = (
   if (!cfg.enabled) return false;
   const s = startHour * 60 + startMin;
   return s >= cfg.startHour * 60 && s + durationMins <= cfg.endHour * 60;
+};
+
+/** 固定排課規則（星期 + 時間）是否落在非營業時間或公休日。 */
+export const isRuleOffHours = (
+  rule: { freq?: string; day: string; time: string },
+  businessHours: BusinessHoursConfig,
+  durationMins: number = DEFAULT_DURATION_MINS,
+): boolean => {
+  if (!rule || rule.freq === '不固定') return false;
+  const cfg = rule.day === '日' ? businessHours.sunday : rule.day === '六' ? businessHours.saturday : businessHours.weekday;
+  if (!cfg.enabled) return true;
+  const [h, m] = (rule.time || '10:00').split(':').map(Number);
+  const s = h * 60 + (m || 0);
+  return !(s >= cfg.startHour * 60 && s + durationMins <= cfg.endHour * 60);
 };
 
 /** 兩個 'YYYY-MM-DD' 相差天數（a - b） */
@@ -435,18 +509,17 @@ export const checkBookingTimeConstraints = ({
     };
   }
 
-  // 1. 臨時預約截止：一般老師開課前 60 分鐘、管理員 10 分鐘（管理員補排過去日期不受此限）
-  const cutoff = isAdmin ? 10 : 60;
-  if (!(isAdmin && isPastDay) && minsUntil < cutoff) {
+  // 1. 臨時預約截止：一般老師嚴格限開課前 60 分鐘；
+  //    管理員不阻擋，但開課前 10 分鐘內 / 已開課 / 過去時段回傳 urgent，由呼叫端顯示紅字提醒。
+  if (!isAdmin && minsUntil < 60) {
     return {
       allowed: false,
       requiresReview: false,
       code: 'deadline',
-      reason: isAdmin
-        ? '已超過開課前 10 分鐘，無法新增預約'
-        : '已超過開課前 1 小時，無法新增預約，請聯絡管理員',
+      reason: '已超過開課前 1 小時，無法新增預約，請聯絡管理員',
     };
   }
+  const urgent = isAdmin && minsUntil < 10;
 
   // 距離上課天數（以日期計）
   const daysAhead = diffDays(dateStr, systemBaseDate);
@@ -487,7 +560,7 @@ export const checkBookingTimeConstraints = ({
     };
   }
 
-  return { allowed: true, requiresReview: false, code: 'ok', priorityOwnerId };
+  return { allowed: true, requiresReview: false, code: 'ok', priorityOwnerId, urgent };
 };
 
 // ------------------------------------------
@@ -519,6 +592,10 @@ export interface ValidateBookingResult {
   ok: boolean;
   /** 阻擋原因（ok=false 時） */
   error?: string;
+  /** 阻擋類別：room = 1v2 大教室無法讓位；time = 時間規則；conflict = 衝堂 */
+  errorKind?: 'room' | 'time' | 'conflict';
+  /** 管理員於開課前 10 分鐘內 / 已開課 / 過去時段預約，確認後直接寫入課表 */
+  urgent?: boolean;
   /** 已套用最終教室、狀態的預約（ok=true 時） */
   booking?: BookingItem;
   /** 非營業時間：呼叫端須取得事由，booking.status 已為 special_pending */
@@ -586,11 +663,16 @@ export const validateAndBuildBooking = ({
     isPastBackfill: false,
     quota: { credits: 0, occupied: 0, exceeds: false, found: false },
   };
-  const fail = (error: string, extra: Partial<ValidateBookingResult> = {}): ValidateBookingResult => ({
+  const fail = (
+    error: string,
+    errorKind: ValidateBookingResult['errorKind'],
+    extra: Partial<ValidateBookingResult> = {},
+  ): ValidateBookingResult => ({
     ...blank,
     ...extra,
     ok: false,
     error,
+    errorKind,
   });
 
   // 1. 教室調度（先決定最終教室，優先時段才能以最終教室比對）
@@ -605,7 +687,7 @@ export const validateAndBuildBooking = ({
     existingBookings: bookings,
     excludeBookingId,
   });
-  if (assignment.blocked) return fail(assignment.notice || '大教室空間不足，無法預約 1v2');
+  if (assignment.blocked) return fail(assignment.notice || '大教室空間不足，無法預約 1v2', 'room');
   const finalRoom = assignment.roomType;
   const autoSwaps = assignment.autoSwaps ?? [];
   const notices = assignment.notice ? [assignment.notice] : [];
@@ -614,6 +696,7 @@ export const validateAndBuildBooking = ({
   let requiresReview = false;
   let reviewReason: string | undefined;
   let priorityOwnerId: string | undefined;
+  let urgent = false;
   if (!skipTimeConstraints) {
     const tc = checkBookingTimeConstraints({
       dateStr: input.date,
@@ -628,10 +711,11 @@ export const validateAndBuildBooking = ({
       businessHours,
       priorityGrid,
     });
-    if (!tc.allowed) return fail(tc.reason || '不符合預約時間規定');
+    if (!tc.allowed) return fail(tc.reason || '不符合預約時間規定', 'time');
     if (tc.requiresReview && mode === 'reschedule') {
-      return fail('改期至非營業時間需由管理員處理，請聯絡管理員或另行新增預約送審');
+      return fail('改期至非營業時間需由管理員處理，請聯絡管理員或另行新增預約送審', 'time');
     }
+    urgent = !!tc.urgent;
     requiresReview = tc.requiresReview;
     reviewReason = tc.reason;
     priorityOwnerId = tc.priorityOwnerId;
@@ -660,7 +744,7 @@ export const validateAndBuildBooking = ({
     excludeBookingId,
   });
   if (conflict.hasConflict) {
-    return fail(conflict.reason || '該時段已有預約', { notices, autoSwaps });
+    return fail(conflict.reason || '該時段已有預約', 'conflict', { notices, autoSwaps });
   }
 
   // 4. 額度（統一以 occupiesQuota 計算）
@@ -695,6 +779,7 @@ export const validateAndBuildBooking = ({
   return {
     ok: true,
     booking,
+    urgent,
     requiresReview,
     reviewReason,
     notices,
@@ -726,6 +811,32 @@ export const findReplaceableAutoBooking = (
     )
     .sort((a, b) => a.date.localeCompare(b.date) || a.startHour * 60 + a.startMin - (b.startHour * 60 + b.startMin))
     .pop();
+
+// ------------------------------------------
+// 簽名時間窗：開課前後各 1 小時
+// ------------------------------------------
+
+export type SignatureWindowStatus = 'too_early' | 'open' | 'late_over_1h';
+
+/**
+ * 簽名時間窗（以課堂開始 startTime 與結束 startTime + 50 分鐘計算）：
+ *  - too_early：距開課超過 1 小時 → 尚未開放簽到，禁止開啟簽名板
+ *  - late_over_1h：已超過課堂結束時間 1 小時以上 → 允許逾期補簽，但需顯示紅字提醒
+ *  - open：其餘（開課前 1 小時 ~ 結束後 1 小時）
+ */
+export const getSignatureWindowStatus = (
+  b: Pick<BookingItem, 'date' | 'startHour' | 'startMin' | 'durationMins'>,
+  systemBaseDate: string,
+  realNow: Date = new Date(),
+): SignatureWindowStatus => {
+  const d = parseDate(b.date);
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), b.startHour, b.startMin).getTime();
+  const end = start + (b.durationMins || DEFAULT_DURATION_MINS) * 60000;
+  const now = getNow(systemBaseDate, realNow).getTime();
+  if (start - now > 60 * 60000) return 'too_early';
+  if (now - end > 60 * 60000) return 'late_over_1h';
+  return 'open';
+};
 
 // ------------------------------------------
 // 免費特殊取消額度
@@ -783,9 +894,11 @@ export interface TeacherMonthStats {
   count1v1: number;
   count1v2: number;
   total: number;
-  /** 正常取消（不含非營業時間預約被駁回） */
+  /** 正常取消（送出即累計；不含非營業時間預約被駁回） */
   normalCancel: number;
-  /** 計罰：計罰取消 + 改期計罰次數 */
+  /** 超時取消（24H 內取消，送出即累計，不等管理員審核；審核結果不影響此欄） */
+  lateCancel: number;
+  /** 計罰次數：僅審核裁決 / 系統結算的結果（逾期取消計罰 + 逾期改期計罰 + 月底未到課計罰） */
   penalty: number;
 }
 
@@ -806,9 +919,43 @@ export const getTeacherStats = (
   const normalCancel = list.filter(
     b => b.status === 'cancelled_normal' && b.cancelReason !== 'after_hours_rejected',
   ).length;
+  // 超時取消：24H 內取消送出即計（待審 / 免罰 / 計罰皆算）；月底系統強制結算者並非老師送出的取消，不列入
+  const lateCancel = list.filter(
+    b =>
+      (b.status === 'special_pending' && b.pendingKind === 'late_change') ||
+      b.status === 'special_approved' ||
+      (b.status === 'special_rejected' && b.settlementType !== 'unattended_no_credit_deducted'),
+  ).length;
   const penalty = list.reduce(
     (n, b) => n + (b.status === 'special_rejected' ? 1 : 0) + (b.penaltyCount || 0),
     0,
   );
-  return { count1v1, count1v2, total: count1v1 + count1v2, normalCancel, penalty };
+  return { count1v1, count1v2, total: count1v1 + count1v2, normalCancel, lateCancel, penalty };
 };
+
+// ------------------------------------------
+// 通知分級 / 審核卡片標籤 / 送審時間
+// ------------------------------------------
+
+export type LogSeverity = 'gray' | 'yellow' | 'red';
+
+/** 通知分級（相容舊資料：沒有 severity 時由 category 推斷，normal → gray） */
+export const getLogSeverity = (l: Pick<AuditLogItem, 'category'> & { severity?: LogSeverity }): LogSeverity =>
+  l.severity ?? (l.category === 'red' ? 'red' : l.category === 'yellow' ? 'yellow' : 'gray');
+
+/** 審核卡片業務類型標籤 */
+export const getReviewTypeLabel = (r: Pick<ReviewItem, 'reviewType' | 'reason'>): string => {
+  switch (r.reviewType) {
+    case 'room_change': return '改室';
+    case 'reschedule': return '逾期改期';
+    case 'after_hours': return '非營業時間';
+    case 'settlement_undo': return '結算更正';
+    case 'sign': return '簽到';
+    case 'late_sign': return '補簽';
+    default: return '逾期取消';
+  }
+};
+
+/** 目前時間，格式 YYYY/MM/DD HH:mm（審核單送審時間） */
+export const formatSubmittedAt = (d: Date = new Date()): string =>
+  `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;

@@ -92,6 +92,12 @@ export interface BookingItem {
   pendingKind?: 'after_hours' | 'late_change';
   /** 取消原因標記（例：after_hours_rejected = 非營業時間預約被駁回，不計入正常取消統計） */
   cancelReason?: string;
+  /** 【僅執行期衍生，不寫入資料庫】改教室審核中：原課堂保留在原教室，並同時卡住目標教室 */
+  roomChangePending?: { from: 'large' | 'small'; to: 'large' | 'small' };
+  /** 【僅執行期衍生】改室審核期間在目標教室產生的佔位（非真實預約，不佔額度、不可操作） */
+  isHold?: boolean;
+  /** 佔位所屬的原預約 ID */
+  holdOf?: string;
 }
 
 export interface ReviewItem {
@@ -107,7 +113,9 @@ export interface ReviewItem {
   reason: string;
   status: 'pending' | 'approved' | 'rejected';
   phone?: string;
-  reviewType?: 'cancel' | 'reschedule' | 'after_hours' | 'settlement_undo' | 'room_change';
+  reviewType?: 'cancel' | 'reschedule' | 'after_hours' | 'settlement_undo' | 'room_change' | 'sign' | 'late_sign';
+  /** 送審時間（YYYY/MM/DD HH:mm，建立審核單時精準記錄） */
+  submittedAt?: string;
   reqDate?: string;
   reqHour?: number;
   reqMin?: number;
@@ -116,6 +124,10 @@ export interface ReviewItem {
   undoReason?: string;
   resolvedAt?: string;
   resolvedNote?: string;
+  /** 批次審核（自動排課非營業時間）：本審核單涵蓋的所有課堂 ID，核准 / 駁回一次套用 */
+  batchBookingIds?: string[];
+  /** 批次審核前各課堂快照（供撤銷還原） */
+  bookingSnapshots?: BookingItem[];
   /** 審核前課堂快照（供撤銷真正還原） */
   bookingSnapshot?: BookingItem;
   /** 審核後課堂狀態（供撤銷時偵測後續變動） */
@@ -141,7 +153,10 @@ export interface AuditLogItem {
   detail?: string;
   summary?: string;
   typeStr: '簽到' | '預約' | '調度' | '改室' | '改期' | '取消' | '購課' | string;
+  /** 舊欄位（相容保留）：normal 等同 gray；新資料請以 severity 為準 */
   category: 'red' | 'yellow' | 'normal';
+  /** 通知分級：gray 一般紀錄（不計未讀紅點）/ yellow 提醒注意 / red 重要警示；舊資料缺漏時由 category 推斷 */
+  severity?: 'gray' | 'yellow' | 'red';
   read: boolean;
   teacherId?: string;
   reviewId?: string;
@@ -169,6 +184,8 @@ export interface ScheduleEngineResult {
   remainingUnscheduled?: number;
   /** 是否因場租老師 90 天預約上限而停止 */
   hitHorizonLimit?: boolean;
+  /** 本次因非營業時間而以 special_pending（待審）排入的堂數（管理員為 0） */
+  afterHoursCount?: number;
   suggestedRoomSwaps?: {
     date: string;
     time: string;

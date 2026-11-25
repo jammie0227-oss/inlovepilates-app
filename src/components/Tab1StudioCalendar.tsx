@@ -4,8 +4,9 @@ import { ChevronLeft, ChevronRight, Lock, AlertTriangle } from 'lucide-react';
 import { formatTimeStr, formatDateWithDay } from '../mockData';
 import { TeacherProfile, BookingItem, StudentItem, ReviewItem } from '../mockData';
 import type { BusinessHoursConfig } from '../types';
-import { getStudentBookingPreset, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours } from '../utils/bookingRules';
-import { systemAlert, systemConfirm } from '../utils/systemAlert';
+import { getStudentBookingPreset, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, isSlotReleased, isActionableBooking, getReviewHoldLabel } from '../utils/bookingRules';
+import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
+import { systemAlert } from '../utils/systemAlert';
 
 export default function Tab1StudioCalendar({
   systemBaseDate, 
@@ -21,7 +22,8 @@ export default function Tab1StudioCalendar({
   onSelectStudent,
   viewMode = 'day',
   setViewMode,
-  openGlobalBooking
+  openGlobalBooking,
+  onExecuteReschedule
 }: {
   systemBaseDate: string;
   businessHours?: BusinessHoursConfig;
@@ -37,6 +39,11 @@ export default function Tab1StudioCalendar({
   viewMode?: 'day' | 'week';
   setViewMode?: (mode: 'day' | 'week') => void;
   openGlobalBooking: (preset?: any) => void;
+  /** 管理員直接變更其他老師課表（改期 / 改室 / 取消） */
+  onExecuteReschedule?: (
+    bookingId: string, newDate: string, newHour: number, newMin: number, newRoom: 'large' | 'small',
+    isCancel?: boolean, newLessonType?: '1v1' | '1v2', reason?: string, autoSwaps?: any[]
+  ) => void;
 }) {
   const [localView, setLocalView] = useState<'week' | 'day'>('day');
   const view = viewMode || localView;
@@ -58,8 +65,9 @@ export default function Tab1StudioCalendar({
 
   // 1. 課堂是否已被取消判定（一般取消、審核免罰取消、審核計罰取消，皆視為已釋出空位）
   // 課堂是否在排班總覽隱藏（釋出空位）：已取消 或 取消審核中，排班總覽一律不佔位，讓其他老師可直接預約
+  // 例外：非營業時間預約待審 (after_hours) 與改室審核佔位 (isHold / roomChangePending) 要卡住時段，不可隱藏
   const isCancelledBooking = (b: BookingItem) => {
-    if (b.status === 'cancelled_normal' || b.status === 'special_approved' || b.status === 'special_rejected' || b.status === 'special_pending') {
+    if (isSlotReleased(b)) {
       return true;
     }
     const relatedRev = reviews.find(r => r.bookingId === b.id && r.status === 'pending');
@@ -69,13 +77,33 @@ export default function Tab1StudioCalendar({
     return false;
   };
 
-  // 取得審核卡片的精準標籤文字（改室審核 / 優先審核）
-  const getReviewBadgeLabel = (bookingId: string) => {
-    const rev = reviews.find(r => r.bookingId === bookingId && r.status === 'pending');
-    if (!rev) return '審核中';
-    if (rev.reviewType === 'room_change') return '改室審核';
-    if (rev.reason?.includes('優先')) return '優先審核';
-    return '審核中';
+  // 審核卡位卡片的標籤文字：「審核中（非營業時間）」/「改室審核中（原教室 ➔ 新教室）」
+  const getReviewBadgeLabel = (b: BookingItem) => getReviewHoldLabel(b) || '審核中';
+  const isHeldByReview = (b: BookingItem) =>
+    !!b.isHold || !!b.roomChangePending || (b.status === 'special_pending' && b.pendingKind === 'after_hours');
+
+  // 管理員點擊其他老師的預約卡片：直接開啟共用變更彈窗（改期 / 改室 / 取消）
+  const [adminEditingBooking, setAdminEditingBooking] = useState<BookingItem | null>(null);
+  const handleCardClick = (b: BookingItem, isMyStudentCard: boolean) => {
+    if (isMyStudentCard) {
+      onSelectStudent(b.studentName || '');
+      return;
+    }
+    if (userRole !== 'admin') return;
+    if (isHeldByReview(b)) {
+      showToast('此課堂正在審核中，審核完成前無法異動');
+      return;
+    }
+    if (!isActionableBooking(b)) {
+      showToast('此課堂已簽到、已結算或已取消，無法再異動');
+      return;
+    }
+    setAdminEditingBooking(b);
+  };
+  const handleAdminEditConfirm = (p: BookingEditConfirmPayload) => {
+    if (!p.isCancel && p.notice) showToast(p.notice);
+    onExecuteReschedule?.(p.bookingId, p.date, p.hour, p.min, p.roomType, p.isCancel, p.lessonType, p.reason, p.autoSwaps);
+    setAdminEditingBooking(null);
   };
 
   // 2. 嚴格過濾：無論管理者 Daisy 還是任課老師，一律只抓取「自己名下」的有效學員
@@ -176,7 +204,7 @@ export default function Tab1StudioCalendar({
   // 1v2 小教室衝突提醒
   const alert1v2Bookings = useMemo(() => {
     return bookings.filter(b => {
-      if (b.status === 'cancelled_normal' || b.status === 'special_pending') return false;
+      if (isSlotReleased(b) || b.isHold) return false;
       if (b.lessonType !== '1v2' || b.roomType !== 'small') return false;
       if (view === 'day') return b.date === currentStr;
       return weekDays.some(w => w.dateStr === b.date);
@@ -188,11 +216,7 @@ export default function Tab1StudioCalendar({
     if (date < systemBaseDate && userRole !== 'admin') {
       return systemAlert('一般老師不可預約過去的日期，如需補排請聯絡管理員');
     }
-    if (date < systemBaseDate) {
-      const confirmPast = await systemConfirm(`【補排過去課堂提醒】\n您選擇的日期為過去時段（${date}）。\n確定要補排此時段的預約嗎？`);
-      if (!confirmPast) return;
-    }
-
+    // 管理員補排過去時段：預約彈窗內會即時顯示紅字提醒，不再另跳確認窗
     if (myStudents.length === 0) return systemAlert('您名下目前無有效學員，無法進行預約');
 
     const targetStudent = myStudents[0];
@@ -300,21 +324,16 @@ export default function Tab1StudioCalendar({
                     const isMyStudentCard = b.teacherId === currentUserId;
                     const canSeeDetails = userRole === 'admin' || isMyStudentCard;
                     const is1v2InSmall = b.lessonType === '1v2' && b.roomType === 'small';
-                    const isPendingReview = b.status === 'special_pending';
+                    const isPendingReview = isHeldByReview(b);
 
                     return (
                       <div 
                         key={b.id} 
-                        onClick={() => { 
-                          if (isMyStudentCard) {
-                            onSelectStudent(b.studentName || '');
-                          } else if (userRole === 'admin') {
-                            showToast('無法檢視其他老師學員內頁');
-                          }
-                        }} 
+                        onClick={() => handleCardClick(b, isMyStudentCard)} 
+                        title={isPendingReview ? getReviewBadgeLabel(b) : undefined}
                         style={{ top: `${top}px`, height: `${b.durationMins || 50}px` }} 
                         className={`absolute inset-x-1 z-10 rounded-lg p-1 flex flex-col justify-center shadow-2xs select-none transition ${
-                          isMyStudentCard ? 'cursor-pointer hover:scale-[1.01]' : 'cursor-default'
+                          isMyStudentCard || userRole === 'admin' ? 'cursor-pointer hover:scale-[1.01]' : 'cursor-default'
                         } ${
                           isPendingReview 
                             ? 'bg-amber-50/95 border-2 border-dashed border-amber-400 text-amber-950' 
@@ -324,11 +343,9 @@ export default function Tab1StudioCalendar({
                         }`}
                       >
                         {isPendingReview && (
-                          <div className="absolute top-0.5 right-1 z-20">
-                            <span className="text-[8px] bg-amber-500 text-white font-black px-1 py-0.5 rounded shadow-2xs">
-                              {getReviewBadgeLabel(b.id)}
-                            </span>
-                          </div>
+                          <span className="self-start max-w-full text-[8px] leading-[10px] bg-amber-500 text-white font-black px-1 py-px rounded shadow-2xs break-words mb-0.5">
+                            {getReviewBadgeLabel(b)}
+                          </span>
                         )}
 
                         {is1v2InSmall && !isPendingReview && (
@@ -409,21 +426,16 @@ export default function Tab1StudioCalendar({
                           const isMyStudentCard = b.teacherId === currentUserId;
                           const canSeeDetails = userRole === 'admin' || isMyStudentCard;
                           const is1v2InSmall = b.lessonType === '1v2' && b.roomType === 'small';
-                          const isPendingReview = b.status === 'special_pending';
+                          const isPendingReview = isHeldByReview(b);
 
                           return (
                             <div 
                               key={b.id} 
-                              onClick={() => { 
-                                if (isMyStudentCard) {
-                                  onSelectStudent(b.studentName || '');
-                                } else if (userRole === 'admin') {
-                                  showToast('無法檢視其他老師學員內頁');
-                                }
-                              }} 
+                              onClick={() => handleCardClick(b, isMyStudentCard)} 
+                              title={isPendingReview ? getReviewBadgeLabel(b) : undefined}
                               style={{ top: `${top}px`, height: `${b.durationMins || 50}px` }} 
                               className={`absolute inset-x-0.5 z-10 rounded p-1 flex flex-col justify-center shadow-2xs select-none transition ${
-                                isMyStudentCard ? 'cursor-pointer hover:scale-[1.02]' : 'cursor-default'
+                                isMyStudentCard || userRole === 'admin' ? 'cursor-pointer hover:scale-[1.02]' : 'cursor-default'
                               } ${
                                 isPendingReview 
                                   ? 'bg-amber-50/95 border border-dashed border-amber-400 text-amber-950' 
@@ -433,8 +445,8 @@ export default function Tab1StudioCalendar({
                               }`}
                             >
                               {isPendingReview ? (
-                                <span className="text-[8px] bg-amber-500 text-white font-black px-1 py-0.2 rounded text-center self-center mb-0.5">
-                                  {getReviewBadgeLabel(b.id)}
+                                <span className="text-[8px] leading-[9px] bg-amber-500 text-white font-black px-1 py-px rounded text-center self-center mb-0.5 break-words max-w-full">
+                                  {getReviewBadgeLabel(b)}
                                 </span>
                               ) : is1v2InSmall ? (
                                 <span className="absolute top-0.5 right-0.5 w-2 h-2 bg-rose-500 rounded-full animate-ping shadow-sm" />
@@ -466,6 +478,22 @@ export default function Tab1StudioCalendar({
             </div>
           </div>
         </div>
+      )}
+
+      {/* 管理員直接變更一般老師課表（共用變更 / 取消彈窗） */}
+      {userRole === 'admin' && (
+        <BookingEditModal
+          booking={adminEditingBooking}
+          userRole={userRole}
+          systemBaseDate={systemBaseDate}
+          bookings={bookings}
+          businessHours={businessHours}
+          priorityGrid={priorityGrid}
+          teachers={teachers}
+          students={students}
+          onClose={() => setAdminEditingBooking(null)}
+          onConfirm={handleAdminEditConfirm}
+        />
       )}
 
     </div>

@@ -1,5 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { PenTool, X, RotateCcw, Check } from 'lucide-react';
+import { getSignatureWindowStatus } from '../utils/bookingRules';
+import { systemAlert } from '../utils/systemAlert';
 
 // ==========================================
 // 0. 手寫畫布元件 (內嵌供 CanvasPadModal 使用)
@@ -191,7 +193,7 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }
       ) : b.status === 'special_pending' ? (
         /* 6. 待審核：區分非營業時間 / 24H 內異動 */
         b.pendingKind === 'after_hours' ? (
-          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">非營業時間待審</span>
+          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">審核中（非營業時間）</span>
         ) : (
           <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">24H內異動待審</span>
         )
@@ -228,15 +230,37 @@ interface CanvasPadModalProps {
   getExactTimestamp: () => string;
 }
 
-export function CanvasPadModal({
+/** 尚未開放簽到：不開啟簽名板，直接跳出系統提醒並關閉 */
+function SignTooEarlyGate({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    systemAlert('尚未開放簽到（開課前 1 小時才可簽名）', '尚未開放簽到');
+    onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
+
+export function CanvasPadModal(props: CanvasPadModalProps) {
+  const { signModalTarget, bookings, systemBaseDate, onClose } = props;
+  if (!signModalTarget) return null;
+
+  const targetId =
+    typeof signModalTarget === 'object' && signModalTarget !== null ? signModalTarget.id : signModalTarget;
+  const bk = bookings.find((b: any) => b.id === targetId);
+  const windowStatus = bk ? getSignatureWindowStatus(bk, systemBaseDate) : 'open';
+  if (windowStatus === 'too_early') return <SignTooEarlyGate onClose={onClose} />;
+  return <CanvasPadModalBody {...props} isOverOneHourLate={windowStatus === 'late_over_1h'} />;
+}
+
+function CanvasPadModalBody({
   signModalTarget,
   bookings,
   systemBaseDate,
   onClose,
   onSign,
   getExactTimestamp,
-}: CanvasPadModalProps) {
-  if (!signModalTarget) return null;
+  isOverOneHourLate,
+}: CanvasPadModalProps & { isOverOneHourLate: boolean }) {
 
   // 相容物件型態或純字串 ID
   const targetBookingId =
@@ -264,6 +288,12 @@ export function CanvasPadModal({
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {isOverOneHourLate && (
+          <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-2xl text-[12px] font-black text-rose-700 leading-relaxed">
+            ⚠️ 此堂課已超過原訂結束時間 1 小時以上，是否確定進行逾期補簽？
+          </div>
+        )}
 
         <CanvasPad
           onCancel={onClose}

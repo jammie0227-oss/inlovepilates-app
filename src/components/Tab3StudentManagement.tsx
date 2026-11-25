@@ -19,7 +19,7 @@ export { default as StudentDetailView } from './StudentDetailView';
 // 1. 第一層：學生管理清單
 // ==========================================
 export default function Tab3StudentManagement({ 
-  systemBaseDate,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, onSmartBook, showToast, teachers, bookings,onSign,
+  systemBaseDate,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, addLog, onSmartBook, showToast, teachers, bookings,onSign,
   userRole, businessHours, priorityGrid
 }: any) {
   const [sortField, setSortField] = useState<'name' | 'next'>('name');
@@ -162,6 +162,7 @@ export default function Tab3StudentManagement({
         if (prev.some((s: any) => s.id === newId)) return prev;
         return [newTrialStudent, ...prev];
       });
+      addLog?.(`新增體驗學員：${newStudentName}（${trialLessonType}）`, '學員資料', 'gray', newStudentName, currentUserId);
       showToast(`已建立體驗學員 [${newStudentName}] 並同步排定課堂！`);
       closeModal();
     } else {
@@ -198,6 +199,8 @@ export default function Tab3StudentManagement({
         if (prev.some((s: any) => s.id === newId)) return prev;
         return [newRegularStudent, ...prev];
       });
+
+      addLog?.(`新增正式學員：${newStudentName}（初始 ${initialCreditsNum} 堂）`, '學員資料', 'gray', newStudentName, currentUserId);
 
       if (!isNoRegular && newRegularStudent.credits > 0) {
         const engine = new ScheduleEngine(bookings, teachers, studentsMap);

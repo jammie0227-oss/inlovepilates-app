@@ -170,6 +170,7 @@ export default function Tab4TeachersManagement({
                 <th className="py-2.5 px-1 font-black text-slate-900">總堂數</th>
                 <th className="py-2.5 px-1">超時取消</th>
                 <th className="py-2.5 px-1">正常取消</th>
+                <th className="py-2.5 px-1">計罰次數</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -189,8 +190,9 @@ export default function Tab4TeachersManagement({
                         <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
                         <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
                         <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
-                        <td className="py-2.5 px-1 text-slate-700">{s.penalty}</td>
+                        <td className="py-2.5 px-1 text-slate-700">{s.lateCancel}</td>
                         <td className="py-2.5 px-1 text-slate-700">{s.normalCancel}</td>
+                        <td className="py-2.5 px-1 font-black text-rose-600">{s.penalty}</td>
                       </tr>
                     );
                   })}
@@ -206,8 +208,9 @@ export default function Tab4TeachersManagement({
                       <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
                       <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
                       <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
-                      <td className="py-2.5 px-1 text-slate-700">{s.penalty}</td>
+                      <td className="py-2.5 px-1 text-slate-700">{s.lateCancel}</td>
                       <td className="py-2.5 px-1 text-slate-700">{s.normalCancel}</td>
+                      <td className="py-2.5 px-1 font-black text-rose-600">{s.penalty}</td>
                     </tr>
                   );
                 })
@@ -532,7 +535,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
   const currentMonthKey = monthKeyOf(systemBaseDate);
   const historyStats = useMemo(() => monthKeys.map(k => {
     const st = computeTeacherStats(bookings, k, teacher.id);
-    return { month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, penalty: st.penalty, normal: st.normalCancel };
+    return { month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, late: st.lateCancel, penalty: st.penalty, normal: st.normalCancel };
   }), [bookings, monthKeys, teacher.id, currentMonthKey]);
 
   return (
@@ -598,6 +601,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
               <th className="py-2.5 font-black text-slate-800">總堂數</th>
               <th className="py-2.5">超時</th>
               <th className="py-2.5">正常</th>
+              <th className="py-2.5">計罰</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -607,8 +611,9 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
                 <td className="py-2.5">{s.v1}</td>
                 <td className="py-2.5">{s.v2}</td>
                 <td className="py-2.5 font-black text-slate-900">{s.total}</td>
-                <td className="py-2.5">{s.penalty}</td>
+                <td className="py-2.5">{s.late}</td>
                 <td className="py-2.5">{s.normal}</td>
+                <td className="py-2.5 font-black text-rose-600">{s.penalty}</td>
               </tr>
             ))}
           </tbody>

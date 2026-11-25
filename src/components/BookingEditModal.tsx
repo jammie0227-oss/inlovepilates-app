@@ -183,6 +183,12 @@ export default function BookingEditModal({
           </button>
         </div>
 
+        {userRole === 'admin' && teachers[booking.teacherId] && (
+          <p className="text-[11px] font-bold text-slate-500">
+            任課老師：{teachers[booking.teacherId].name}（管理員直接變更，完成後將寫入稽核紀錄並通知老師）
+          </p>
+        )}
+
         {/* 原預約內容 */}
         <div className="p-2.5 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-2">
           <span className={`w-3 h-3 rounded-full shrink-0 ${booking.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />

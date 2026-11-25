@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3, X } from
 import { formatTimeStr, formatDateWithDay, getDayOfWeek } from '../mockData';
 import { BookingStatusBadge, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { isOverdueUnsettled, isCancelledBooking, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours } from '../utils/bookingRules';
+import { isOverdueUnsettled, isSlotReleased, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, getReviewHoldLabel } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
 
 export default function Tab2PersonalSchedule({
@@ -13,6 +13,7 @@ export default function Tab2PersonalSchedule({
   currentUserId, 
   teachers, 
   bookings, 
+  calendarBookings,
   onProcessSettlement,
   onRequestSettlementUndo,
   reviews = [],
@@ -86,7 +87,9 @@ export default function Tab2PersonalSchedule({
   const isToday = currentStr === systemBaseDate;
   const isPast = currentStr < systemBaseDate;
 
-  const hours = getCalendarHours(businessHours, bookings);
+  // 日曆格（週 / 月）使用含審核卡位的清單：非營業時間待審與改室審核佔位都要卡住格子
+  const calendarSource: any[] = calendarBookings || bookings;
+  const hours = getCalendarHours(businessHours, calendarSource);
 
   // 週曆 7 天日期生成
   const weekDays = useMemo(() => {
@@ -114,6 +117,10 @@ export default function Tab2PersonalSchedule({
   const myBookings = useMemo(() => {
     return bookings.filter((b: any) => b.teacherId === currentUserId);
   }, [bookings, currentUserId]);
+
+  const myCalendarBookings = useMemo(() => {
+    return calendarSource.filter((b: any) => b.teacherId === currentUserId);
+  }, [calendarSource, currentUserId]);
 
   // 篩選當前老師「逾期未簽到且未取消」的課堂
   const myOverdueBookings = useMemo(() => {
@@ -196,7 +203,7 @@ export default function Tab2PersonalSchedule({
   useEffect(() => {
     if (view === 'week' && weekVerticalScrollRef.current) {
       const weekDatesSet = new Set(weekDays.map(w => w.dateStr));
-      const activeWeekBookings = myBookings.filter((b: any) => weekDatesSet.has(b.date) && !isCancelledBooking(b.status));
+      const activeWeekBookings = myCalendarBookings.filter((b: any) => weekDatesSet.has(b.date) && !isSlotReleased(b));
       
       if (activeWeekBookings.length > 0) {
         const earliestMins = Math.min(...activeWeekBookings.map((b: any) => b.startHour * 60 + b.startMin));
@@ -206,7 +213,7 @@ export default function Tab2PersonalSchedule({
         weekVerticalScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
       }
     }
-  }, [view, weekDays, myBookings]);
+  }, [view, weekDays, myCalendarBookings]);
 
   const openRescheduleModal = (b: any) => setEditingBooking(b);
 
@@ -338,6 +345,11 @@ export default function Tab2PersonalSchedule({
                     <span className={`w-2.5 h-2.5 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                     <span className="font-black text-slate-900 text-sm mr-1">{b.studentName}</span>
                     <span className="text-slate-400">({b.lessonType})</span>
+                    {reviews.some((r: any) => r.bookingId === b.id && r.status === 'pending' && r.reviewType === 'room_change') && (
+                      <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">
+                        {getReviewHoldLabel(calendarSource.find((x: any) => x.id === b.id && !x.isHold) || b) || '改室審核中'}
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
                     <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">變更</button>
@@ -440,7 +452,7 @@ export default function Tab2PersonalSchedule({
             {Array.from({ length: new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0).getDate() }).map((_, i) => {
               const dayNum = i + 1;
               const dateStr = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-              const dayBks = myBookings.filter((b: any) => b.date === dateStr && !isCancelledBooking(b.status));
+              const dayBks = myCalendarBookings.filter((b: any) => b.date === dateStr && !isSlotReleased(b));
               const isMonthToday = dateStr === systemBaseDate;
               const isMonthPast = dateStr < systemBaseDate;
 
@@ -454,14 +466,17 @@ export default function Tab2PersonalSchedule({
                     {dayNum}
                   </span>
                   {dayBks.map((b: any) => {
+                    const holdLabel = getReviewHoldLabel(b);
                     return (
                       <div 
                         key={b.id} 
                         onClick={() => onSelectStudent(b.studentName)} 
-                        className={`text-[11px] truncate px-1.5 py-0.5 rounded shadow-2xs cursor-pointer hover:scale-[1.02] transition-transform ${getPersonalBookingStyle(b, 'month')}`}
-                        title={`${b.studentName} (${b.roomType === 'large' ? '大教室' : '小教室'})`}
+                        className={`text-[11px] truncate px-1.5 py-0.5 rounded shadow-2xs cursor-pointer hover:scale-[1.02] transition-transform ${
+                          holdLabel ? 'bg-amber-50 border border-dashed border-amber-400 text-amber-900' : getPersonalBookingStyle(b, 'month')
+                        }`}
+                        title={holdLabel ? `${b.studentName}｜${holdLabel}` : `${b.studentName} (${b.roomType === 'large' ? '大教室' : '小教室'})`}
                       >
-                        {b.studentName}
+                        {holdLabel ? '⏳ ' : ''}{b.studentName}
                       </div>
                     );
                   })}
@@ -507,7 +522,11 @@ export default function Tab2PersonalSchedule({
                     <div 
                       key={h} 
                       onClick={() => {
-                        if (item.isPast) return;
+                        // 一般老師不可預約過去日期；管理員可點過去時段補排（預約彈窗內會即時顯示紅字提醒）
+                        if (item.isPast && userRole !== 'admin') {
+                          systemAlert('一般老師不可預約過去的日期，如需補排請聯絡管理員');
+                          return;
+                        }
                         // 點擊空白處：統一呼叫全域預約入口，帶入該日期與整點
                         openGlobalBooking({ date: item.dateStr, hour: String(h).padStart(2, '0') });
                       }}
@@ -521,17 +540,25 @@ export default function Tab2PersonalSchedule({
                       )}
                     </div>
                   ))}
-                  {myBookings.filter((b: any) => b.date === item.dateStr && !isCancelledBooking(b.status)).map((b: any) => {
+                  {myCalendarBookings.filter((b: any) => b.date === item.dateStr && !isSlotReleased(b)).map((b: any) => {
                     const top = (b.startHour - hours[0]) * 60 + b.startMin;
+                    const holdLabel = getReviewHoldLabel(b);
                     return (
                       <div
                         key={b.id}
                         onClick={() => onSelectStudent(b.studentName)}
+                        title={holdLabel ? `${b.studentName}｜${holdLabel}` : undefined}
                         style={{ top: `${top}px`, height: `48px` }}
-                        className={`absolute inset-x-0.5 z-10 rounded p-1 flex flex-col justify-center cursor-pointer shadow-2xs select-none transition hover:scale-[1.02] ${getPersonalBookingStyle(b, 'week')}`}
+                        className={`absolute inset-x-0.5 z-10 rounded p-1 flex flex-col justify-center cursor-pointer shadow-2xs select-none transition hover:scale-[1.02] ${
+                          holdLabel ? 'bg-amber-50 border border-dashed border-amber-400 text-amber-950' : getPersonalBookingStyle(b, 'week')
+                        }`}
                       >
                         <span className="text-[12px] font-black truncate text-center leading-tight">{b.studentName}</span>
-                        <span className="text-[10px] font-mono opacity-80 text-center leading-tight mt-0.5">{formatTimeStr(b.startHour, b.startMin)}</span>
+                        {holdLabel ? (
+                          <span className="text-[8px] leading-[9px] font-black text-amber-800 text-center break-words mt-0.5">{holdLabel}</span>
+                        ) : (
+                          <span className="text-[10px] font-mono opacity-80 text-center leading-tight mt-0.5">{formatTimeStr(b.startHour, b.startMin)}</span>
+                        )}
                       </div>
                     );
                   })}

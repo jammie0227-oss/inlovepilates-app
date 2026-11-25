@@ -11,10 +11,17 @@ import type {
 const fmtTime = (hour: number, min: number) =>
   `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 
-// 判定是否為已取消釋出的課堂（一般取消、免罰取消、計罰取消皆已釋出空間；待審核亦視同釋出，不卡時段）
-export const isCancelledSlot = (status: string) => {
-  return status === 'cancelled_normal' || status === 'special_approved' || status === 'special_rejected' || status === 'special_pending';
+// 判定是否為已釋出空位的課堂：
+// 一般取消、免罰取消、計罰取消皆已釋出；24H 內異動/取消待審（special_pending）亦釋出。
+// 例外：非營業時間預約待審（pendingKind === 'after_hours'）要卡住時段，管理員駁回後才釋出。
+export const isCancelledSlot = (status: string, pendingKind?: string) => {
+  if (status === 'special_pending') return pendingKind !== 'after_hours';
+  return status === 'cancelled_normal' || status === 'special_approved' || status === 'special_rejected';
 };
+
+/** 改室審核佔位（isHold）屬於原預約本人時，檢查原預約自己的衝堂應略過 */
+const isOwnHold = (b: { holdOf?: string }, excludeBookingId?: string) =>
+  !!excludeBookingId && b.holdOf === excludeBookingId;
 
 // 全域衝堂防呆檢測引擎（含角色權限隱私遮罩與換室建議）
 export const checkGlobalConflict = ({
@@ -53,8 +60,9 @@ export const checkGlobalConflict = ({
 
   // 1. 檢查同教室是否有預約佔用
   for (const b of existingBookings) {
-    if (isCancelledSlot(b.status)) continue; // 已取消的課堂空間全空，不計入衝堂
+    if (isCancelledSlot(b.status, b.pendingKind)) continue; // 已取消的課堂空間全空，不計入衝堂
     if (excludeBookingId && b.id === excludeBookingId) continue;
+    if (isOwnHold(b, excludeBookingId)) continue;
     if (b.date !== dateStr) continue;
 
     const bStart = b.startHour * 60 + b.startMin;
@@ -74,8 +82,9 @@ export const checkGlobalConflict = ({
       // 檢查另一間教室是否為空（狀況 E 換室建議）
       const otherRoom: 'large' | 'small' = roomType === 'large' ? 'small' : 'large';
       const isOtherRoomFree = !existingBookings.some(ob => {
-        if (isCancelledSlot(ob.status)) return false;
+        if (isCancelledSlot(ob.status, ob.pendingKind)) return false;
         if (excludeBookingId && ob.id === excludeBookingId) return false;
+        if (isOwnHold(ob, excludeBookingId)) return false;
         if (ob.date !== dateStr || ob.roomType !== otherRoom) return false;
         const obStart = ob.startHour * 60 + ob.startMin;
         const obEnd = obStart + (ob.durationMins || 50);
