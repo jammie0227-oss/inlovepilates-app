@@ -1,23 +1,21 @@
 'use client';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3, X } from 'lucide-react';
-import { formatTimeStr, formatDateWithDay, getDayOfWeek } from '../mockData';
+import { formatTimeStr, formatDateWithDay, getDayOfWeek, getExactTimestamp } from '../mockData';
 import { BookingStatusBadge, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { isOverdueUnsettled, isSlotReleased, isWithinBusinessHours, DEFAULT_BUSINESS_HOURS, getCalendarHours, getReviewHoldLabel, isPendingApproval, REVIEW_TAG } from '../utils/bookingRules';
-import { systemAlert } from '../utils/systemAlert';
+import { isOverdueUnsettled, getSignatureWindowStatus, isSlotReleased, DAY_HOURS, isPendingApproval, REVIEW_TAG } from '../utils/bookingRules';
+import { useCalendarAutoScroll } from '../utils/useCalendarAutoScroll';
+import { useNow } from '../utils/useToday';
 
 export default function Tab2PersonalSchedule({
-  systemBaseDate,
+  today,
   userRole, 
   currentUserId, 
   teachers, 
   bookings, 
-  calendarBookings,
+  isActive = true,
   onProcessSettlement,
-  onRequestSettlementUndo,
-  reviews = [],
-  businessHours = DEFAULT_BUSINESS_HOURS,
   priorityGrid,
   onExecuteReschedule,
   students, 
@@ -29,14 +27,6 @@ export default function Tab2PersonalSchedule({
   setViewMode,
   openGlobalBooking
 }: any) {
-  // 非營業時間 / 公休日：淡灰斜線底（與 Tab 1 一致）
-  const isClosedSlot = (dateStr: string, h: number) =>
-    !isWithinBusinessHours(dateStr, h, 0, businessHours, 60);
-  const closedStyle = (dateStr: string, h: number): React.CSSProperties | undefined =>
-    isClosedSlot(dateStr, h)
-      ? { backgroundImage: 'repeating-linear-gradient(135deg, rgba(148,163,184,0.18) 0, rgba(148,163,184,0.18) 4px, transparent 4px, transparent 8px)', backgroundColor: 'rgba(241,245,249,0.7)' }
-      : undefined;
-
   const [localView, setLocalView] = useState<'month' | 'week' | 'day'>('day');
   const view = viewMode || localView;
   const setView = setViewMode || setLocalView;
@@ -50,9 +40,8 @@ export default function Tab2PersonalSchedule({
     Record<string, { report: 'attended_unsigned' | 'unattended_not_cancelled' | 'pending'; reason: string }>
   >({});
 
-  // 1. 動態解析全局基準日
-  const [sysYear, sysMonth, sysDay] = systemBaseDate.split('-').map(Number);
-  const todayStr = systemBaseDate;
+  // 1. 解析今天的日期
+  const [sysYear, sysMonth, sysDay] = today.split('-').map(Number);
   const todayDateObj = new Date(sysYear, sysMonth - 1, sysDay);
   const lastDayOfMonth = new Date(sysYear, sysMonth, 0).getDate();
   const isLast5Days = (lastDayOfMonth - todayDateObj.getDate()) < 5;
@@ -60,35 +49,23 @@ export default function Tab2PersonalSchedule({
   // 變更 / 取消 預約彈窗狀態
   const [editingBooking, setEditingBooking] = useState<any>(null);
 
-  // 結算更正：一般老師須送審；管理員直接生效
-  const [undoTarget, setUndoTarget] = useState<any>(null);
-  const [undoReason, setUndoReason] = useState('');
-  const submitUndoRequest = () => {
-    if (!undoReason.trim()) return systemAlert('請填寫結算更正的事由');
-    if (onRequestSettlementUndo) onRequestSettlementUndo(undoTarget.id, undoReason.trim());
-    setUndoTarget(null);
-    setUndoReason('');
-  };
-
   const [activeSignModal, setActiveSignModal] = useState<{ id: string; studentName: string } | null>(null);
   const [zoomedImage, setZoomedImage] = useState<{ url: string; time: string } | null>(null);
 
   const weekVerticalScrollRef = useRef<HTMLDivElement>(null);
 
   
-  // 2. 基於 systemBaseDate 建立運算用日期
+  // 2. 以今天為基準建立運算用日期
   const baseDate = new Date(sysYear, sysMonth - 1, sysDay);
   if (view === 'month') { baseDate.setDate(1); baseDate.setMonth(baseDate.getMonth() + offset); }
   if (view === 'week') baseDate.setDate(baseDate.getDate() + offset * 7);
   if (view === 'day') baseDate.setDate(baseDate.getDate() + offset);
 
   const currentStr = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(baseDate.getDate()).padStart(2, '0')}`;
-  const isToday = currentStr === systemBaseDate;
-  const isPast = currentStr < systemBaseDate;
+  const isToday = currentStr === today;
+  const isPast = currentStr < today;
 
-  // 日曆格（週 / 月）使用含審核卡位的清單：非營業時間待審與改室審核佔位都要卡住格子
-  const calendarSource: any[] = calendarBookings || bookings;
-  const hours = getCalendarHours(businessHours, calendarSource);
+  const hours = DAY_HOURS;
 
   // 週曆 7 天日期生成
   const weekDays = useMemo(() => {
@@ -106,50 +83,35 @@ export default function Tab2PersonalSchedule({
         dateStr: str,
         shortDate: `${m}/${dateNum}`,
         dayName: `(${dayName})`,
-        isPast: str < systemBaseDate,
-        isToday: str === systemBaseDate
+        isPast: str < today,
+        isToday: str === today
       };
     });
   }, [baseDate, offset]);
 
-  // 改室審核中：課堂資料仍保留原教室，畫面一律以「預計使用的教室」顏色呈現，只多掛「改室審核」標籤
-  const roomChangeTargets = new Map<string, 'large' | 'small'>(
-    calendarSource
-      .filter((b: any) => !b.isReleasedGhost && b.roomChangePending)
-      .map((b: any) => [b.id, b.roomChangePending.to])
-  );
-  const displayRoom = (b: any): 'large' | 'small' => roomChangeTargets.get(b.id) ?? b.roomType;
-  const roomChangeTag = (id: string) =>
-    roomChangeTargets.has(id) && (
-      <span className="shrink-0 text-[10px] font-sans bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">{REVIEW_TAG.room_change}</span>
-    );
-
-  // 審核中的課堂沿用教室顏色，僅多掛這個文字標籤
-  const reviewTagLabel = (b: any): string | null => getReviewHoldLabel(b);
-  // 待審核（非營業 / 非優先 / 改室）：審核完成前不可變更，仍可簽名與取消
-  const isUnderReview = (b: any): boolean => isPendingApproval(b) || roomChangeTargets.has(b.id);
+  // 非優先審核中的課堂沿用教室顏色，僅多掛這個文字標籤
+  const reviewTagLabel = (b: any): string | null => (isPendingApproval(b) ? REVIEW_TAG : null);
 
   // 個人名下所有課程
   const myBookings = useMemo(() => {
     return bookings.filter((b: any) => b.teacherId === currentUserId);
   }, [bookings, currentUserId]);
 
-  const myCalendarBookings = useMemo(() => {
-    return calendarSource.filter((b: any) => b.teacherId === currentUserId);
-  }, [calendarSource, currentUserId]);
-
   // 篩選當前老師「逾期未簽到且未取消」的課堂
+  const now = useNow();
   const myOverdueBookings = useMemo(() => {
     return bookings.filter((b: any) => {
-      // 個人課表一律只看「自己」的課堂；逾期＝嚴格早於基準日、有效、未簽、未鎖定
-      return b.teacherId === currentUserId && isOverdueUnsettled(b, todayStr);
+      // 個人課表一律只看「自己」的課堂；逾期＝開課時間已過、未簽、未取消
+      return b.teacherId === currentUserId && isOverdueUnsettled(b, now);
     });
-  }, [bookings, currentUserId, todayStr]);
+  }, [bookings, currentUserId, now]);
+  // 清單內容有變才變動（每分鐘重算不應重置展開狀態）
+  const overdueKey = myOverdueBookings.map((b: any) => b.id).join('|');
 
     // 個人課表專用樣式引擎 (依據教室給予明顯顏色、動態粗細與過去時間遮罩)
   const getPersonalBookingStyle = (b: any, viewType: 'month' | 'week' | 'day') => {
     const isLarge = b.roomType === 'large';
-    const isPast = b.date < systemBaseDate;
+    const isPast = b.date < today;
 
     // 1. 教室代表底色：過去時間採用半透明 (/60)，未來維持實色
     const bg = isLarge 
@@ -182,7 +144,7 @@ export default function Tab2PersonalSchedule({
     return myBookings.filter((b: any) => {
       if (b.date !== currentStr) return false;
       if (!b.signed && isPendingApproval(b)) return false; // 待審核課堂歸入「即將上課」
-      return b.signed || b.status === 'cancelled_normal' || b.status === 'special_approved' || b.status === 'special_rejected' || b.status === 'special_pending';
+      return b.signed || b.status === 'cancelled_normal';
     }).sort((a: any, b: any) => (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
   }, [myBookings, currentStr]);
 
@@ -192,7 +154,8 @@ export default function Tab2PersonalSchedule({
       upcomingBookingsForDay.some((ub: any) => ub.studentName === ob.studentName)
     );
     setIsOverdueExpanded(hasTodayClass);
-  }, [myOverdueBookings, upcomingBookingsForDay]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overdueKey, upcomingBookingsForDay]);
   // 修改草稿預設為 pending
   const handleOpenMonthEndModal = () => {
     const initialDrafts: Record<string, { report: 'attended_unsigned' | 'unattended_not_cancelled' | 'pending'; reason: string }> = {};
@@ -209,20 +172,11 @@ export default function Tab2PersonalSchedule({
     setIsMonthEndModalOpen(false);
   };
 
-  useEffect(() => {
-    if (view === 'week' && weekVerticalScrollRef.current) {
-      const weekDatesSet = new Set(weekDays.map(w => w.dateStr));
-      const activeWeekBookings = myCalendarBookings.filter((b: any) => weekDatesSet.has(b.date) && !isSlotReleased(b));
-      
-      if (activeWeekBookings.length > 0) {
-        const earliestMins = Math.min(...activeWeekBookings.map((b: any) => b.startHour * 60 + b.startMin));
-        const scrollTarget = Math.max(0, earliestMins - hours[0] * 60);
-        weekVerticalScrollRef.current.scrollTo({ top: scrollTarget, behavior: 'smooth' });
-      } else {
-        weekVerticalScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
-      }
-    }
-  }, [view, weekDays, myCalendarBookings]);
+  // 週曆：自動捲動到當週第一堂課（管理員看全館、老師看自己；無課則 09:00）
+  useCalendarAutoScroll({
+    ref: weekVerticalScrollRef, enabled: isActive && view === 'week', dates: weekDays.map(w => w.dateStr),
+    bookings, userRole, currentUserId,
+  });
 
   const openRescheduleModal = (b: any) => setEditingBooking(b);
 
@@ -236,15 +190,9 @@ export default function Tab2PersonalSchedule({
       p.roomType,
       p.isCancel,
       p.lessonType,
-      p.reason,
       p.autoSwaps
     );
     setEditingBooking(null);
-  };
-
-  const getExactTimestamp = () => {
-    const d = new Date();
-    return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
   };
 
   return (
@@ -315,7 +263,7 @@ export default function Tab2PersonalSchedule({
             </div>
           </div>
           {isOverdueExpanded && (
-            <div className="space-y-1.5 pt-2 border-t border-amber-200/50 mt-2">
+            <div className="space-y-1.5 pt-2 border-t border-amber-200/50 mt-2 max-h-[28vh] overflow-y-auto">
               {myOverdueBookings.map((b: any) => (
                 <div key={b.id} className="p-2.5 bg-white rounded-xl border border-amber-200 flex justify-between items-center text-xs shadow-2xs">
                   <div>
@@ -325,8 +273,8 @@ export default function Tab2PersonalSchedule({
                     </div>
                   </div>
                   <div className="flex gap-1.5">
-                    <button onClick={() => openRescheduleModal(b)} className="text-[11px] bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg font-bold transition">{isUnderReview(b) ? '取消' : '變更'}</button>
-                    <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="text-[11px] bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded-lg font-bold transition shadow-xs">補簽</button>
+                    <button onClick={() => openRescheduleModal(b)} className="text-[11px] bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg font-bold transition">變更</button>
+                    <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="text-[11px] bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded-lg font-bold transition shadow-xs">{getSignatureWindowStatus(b, now) === 'late_over_1h' ? '補簽' : '簽名'}</button>
                   </div>
                 </div>
               ))}
@@ -337,7 +285,7 @@ export default function Tab2PersonalSchedule({
 
       {/* 日曆檢視 */}
       {view === 'day' && (
-        <div className={`flex-1 overflow-y-auto bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs space-y-3.5 scroll-smooth ${
+        <div className={`flex-1 min-h-[260px] overflow-y-auto bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs space-y-3.5 scroll-smooth ${
           isPast ? 'bg-slate-100/70 grayscale' : ''
         }`}>
           <div className="space-y-2.5">
@@ -348,22 +296,23 @@ export default function Tab2PersonalSchedule({
               <div key={b.id} onClick={() => onSelectStudent(b.studentName)} className="p-3 bg-slate-50 hover:bg-slate-100/80 rounded-2xl border border-slate-200 space-y-2 text-xs cursor-pointer shadow-2xs transition">
                 <div className="flex justify-between items-center gap-2 font-mono">
                   <span className="font-black text-slate-800 text-sm">📅 {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
-                  {roomChangeTag(b.id) || (isPendingApproval(b) && (
-                    <span className="shrink-0 whitespace-nowrap text-[10px] font-sans bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">{reviewTagLabel(b)}</span>
-                  ))}
+                  {isPendingApproval(b) && (
+                    <span className="shrink-0 whitespace-nowrap text-[10px] font-sans bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">{REVIEW_TAG}</span>
+                  )}
                 </div>
                 <div className="flex justify-between items-center text-slate-700 font-bold">
                   <div className="flex items-center gap-1.5">
-                    <span className={`w-2.5 h-2.5 rounded-full ${displayRoom(b) === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
+                    <span className={`w-2.5 h-2.5 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                     <span className="font-black text-slate-900 text-sm mr-1">{b.studentName}</span>
                     <span className="text-slate-400">({b.lessonType})</span>
                   </div>
                   <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-                    {isUnderReview(b) ? (
+                    {isPendingApproval(b) ? (
                       <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1 rounded-xl text-[11px] font-bold border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 transition">取消</button>
                     ) : (
                       <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">變更</button>
                     )}
+                    {/* 非優先審核中同樣保留簽名（現場緊急情況保險），時間窗由簽名彈窗把關 */}
                     <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="bg-rose-500 hover:bg-rose-600 text-white font-black px-3 py-1 rounded-xl flex items-center gap-1 shadow-xs transition">
                       <PenTool className="w-3.5 h-3.5" /> 簽名
                     </button>
@@ -401,13 +350,12 @@ export default function Tab2PersonalSchedule({
               <div key={b.id} onClick={() => onSelectStudent(b.studentName)} className="p-3 bg-slate-50 rounded-xl space-y-2 text-xs text-slate-600 border border-slate-200 cursor-pointer hover:bg-slate-100 transition shadow-2xs">
                 <div className="flex justify-between items-center font-mono">
                   <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${displayRoom(b) === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
+                    <span className={`w-2 h-2 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                     <span className="font-bold">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
                     <span className="font-black text-slate-800 font-sans">{b.studentName}</span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {roomChangeTag(b.id)}
                     <BookingStatusBadge booking={b} onZoomSignature={setZoomedImage} />
                   </div>
                 </div>
@@ -416,22 +364,6 @@ export default function Tab2PersonalSchedule({
                     <p className="font-bold">⚡ 系統代結對帳憑證</p>
                     <p>代結時間：<span className="font-mono">{b.systemSignedAt || b.signedAt || '—'}</span></p>
                     <p>事由備註：{b.overdueReason || '—'}</p>
-                  </div>
-                )}
-                {b.isSettlementLocked && (
-                  <div className="flex items-center justify-between gap-2" onClick={e => e.stopPropagation()}>
-                    <span className="text-[10px] text-slate-500 font-bold">🔒 結算已鎖定</span>
-                    {reviews.some((r: any) => r.bookingId === b.id && r.reviewType === 'settlement_undo' && r.status === 'pending') ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">更正審核</span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => { setUndoTarget(b); setUndoReason(''); }}
-                        className="text-[11px] bg-white border border-slate-300 hover:bg-slate-100 px-2.5 py-1 rounded-lg font-bold transition"
-                      >
-                        結算更正
-                      </button>
-                    )}
                   </div>
                 )}
                 <div className="relative" onClick={e => e.stopPropagation()}>
@@ -464,9 +396,9 @@ export default function Tab2PersonalSchedule({
             {Array.from({ length: new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0).getDate() }).map((_, i) => {
               const dayNum = i + 1;
               const dateStr = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-              const dayBks = myCalendarBookings.filter((b: any) => b.date === dateStr && !isSlotReleased(b));
-              const isMonthToday = dateStr === systemBaseDate;
-              const isMonthPast = dateStr < systemBaseDate;
+              const dayBks = myBookings.filter((b: any) => b.date === dateStr && !isSlotReleased(b));
+              const isMonthToday = dateStr === today;
+              const isMonthPast = dateStr < today;
 
               return (
                 <div key={i} className={`min-h-[75px] min-w-0 overflow-hidden border-r border-b border-slate-100 p-1 flex flex-col gap-0.5 transition ${
@@ -503,23 +435,24 @@ export default function Tab2PersonalSchedule({
       {/* 週曆檢視 */}
       {view === 'week' && (
         <div className="flex-1 flex flex-col bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden relative">
-          <div className="grid grid-cols-[34px_repeat(7,minmax(0,1fr))] border-b border-slate-200 text-center text-xs font-bold bg-slate-50 py-1.5 divide-x divide-slate-200 shrink-0 sticky top-0 z-30">
-            <div className="text-slate-400 font-mono flex items-center justify-center text-[10px]">時</div>
-            {weekDays.map((item, idx) => (
-              <div key={idx} className={`px-0.5 py-0.5 flex flex-col items-center justify-center leading-tight ${
-                item.isToday 
-                  ? 'bg-rose-50/80 text-rose-600 font-black' 
-                  : item.isPast 
-                    ? 'text-slate-400' 
-                    : 'text-slate-700'
-              }`}>
-                <span className="text-[10px] font-mono leading-none">{item.shortDate}</span>
-                <span className="text-[10px] font-sans leading-none mt-0.5">{item.dayName}</span>
-              </div>
-            ))}
-          </div>
-
+          {/* 表頭與時段格置於同一個垂直捲動容器：兩者可用寬度相同（捲軸不會造成欄位偏移） */}
           <div ref={weekVerticalScrollRef} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
+            <div className="grid grid-cols-[34px_repeat(7,minmax(0,1fr))] border-b border-slate-200 text-center text-xs font-bold bg-slate-50 py-1.5 divide-x divide-slate-200 sticky top-0 z-30">
+              <div className="text-slate-400 font-mono flex items-center justify-center text-[10px]">時</div>
+              {weekDays.map((item, idx) => (
+                <div key={idx} className={`px-0.5 py-0.5 flex flex-col items-center justify-center leading-tight ${
+                  item.isToday 
+                    ? 'bg-rose-50/80 text-rose-600 font-black' 
+                    : item.isPast 
+                      ? 'text-slate-400' 
+                      : 'text-slate-700'
+                }`}>
+                  <span className="text-[10px] font-mono leading-none">{item.shortDate}</span>
+                  <span className="text-[10px] font-sans leading-none mt-0.5">{item.dayName}</span>
+                </div>
+              ))}
+            </div>
+
             <div className="grid grid-cols-[34px_repeat(7,minmax(0,1fr))] divide-x divide-slate-200 text-xs font-mono relative w-full">
               <div className="text-slate-500 bg-slate-50/95 font-bold flex flex-col divide-y divide-slate-100 select-none sticky left-0 z-20">
                 {hours.map(h => (
@@ -535,25 +468,13 @@ export default function Tab2PersonalSchedule({
                     <div 
                       key={h} 
                       onClick={() => {
-                        // 一般老師不可預約過去日期；管理員可點過去時段補排（預約彈窗內會即時顯示紅字提醒）
-                        if (item.isPast && userRole !== 'admin') {
-                          systemAlert('一般老師不可預約過去的日期，如需補排請聯絡管理員');
-                          return;
-                        }
                         // 點擊空白處：統一呼叫全域預約入口，帶入該日期與整點
                         openGlobalBooking({ date: item.dateStr, hour: String(h).padStart(2, '0') });
                       }}
-                      style={closedStyle(item.dateStr, h)}
                       className="h-[60px] border-b border-slate-100 border-dotted cursor-pointer hover:bg-slate-50 transition relative" 
-                    >
-                      {isClosedSlot(item.dateStr, h) && (
-                        <span className="absolute inset-0 flex items-center justify-center text-[9px] text-slate-400/70 pointer-events-none select-none">
-                          {new Date(`${item.dateStr}T00:00:00`).getDay() === 0 ? '公休' : '非營業'}
-                        </span>
-                      )}
-                    </div>
+                    />
                   ))}
-                  {myCalendarBookings.filter((b: any) => b.date === item.dateStr && !isSlotReleased(b)).map((b: any) => {
+                  {myBookings.filter((b: any) => b.date === item.dateStr && !isSlotReleased(b)).map((b: any) => {
                     const top = (b.startHour - hours[0]) * 60 + b.startMin;
                     const tagLabel = reviewTagLabel(b);
                     return (
@@ -582,11 +503,10 @@ export default function Tab2PersonalSchedule({
       {/* 變更 / 取消 預約 Modal (共用元件) */}
       <BookingEditModal
         booking={editingBooking}
-        cancelOnly={!!editingBooking && isUnderReview(editingBooking)}
+        cancelOnly={!!editingBooking && isPendingApproval(editingBooking)}
         userRole={userRole}
-        systemBaseDate={systemBaseDate}
-        bookings={calendarSource}
-        businessHours={businessHours}
+        today={today}
+        bookings={bookings}
         priorityGrid={priorityGrid}
         teachers={teachers}
         students={students}
@@ -598,7 +518,6 @@ export default function Tab2PersonalSchedule({
       <CanvasPadModal
         signModalTarget={activeSignModal}
         bookings={bookings}
-        systemBaseDate={systemBaseDate}
         onClose={() => setActiveSignModal(null)}
         onSign={onSign}
         getExactTimestamp={getExactTimestamp}
@@ -609,30 +528,6 @@ export default function Tab2PersonalSchedule({
         zoomedSignature={zoomedImage}
         onClose={() => setZoomedImage(null)}
       />
-
-      {/* 結算更正 Modal */}
-      {undoTarget && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-3 border border-slate-100 text-xs">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-black text-slate-800">結算更正 ({undoTarget.studentName})</h3>
-              <button onClick={() => setUndoTarget(null)} className="p-1 hover:bg-slate-100 rounded-lg text-slate-400"><X className="w-4 h-4" /></button>
-            </div>
-            <p className="font-mono font-bold text-slate-700">{formatDateWithDay(undoTarget.date)} {formatTimeStr(undoTarget.startHour, undoTarget.startMin)}</p>
-            <textarea
-              value={undoReason}
-              onChange={e => setUndoReason(e.target.value)}
-              rows={3}
-              placeholder={userRole === 'admin' ? '請填寫更正事由（必填），確認後直接生效...' : '請填寫更正事由（必填），送出後由管理員審核...'}
-              className="w-full border border-slate-300 rounded-xl p-2 outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
-            />
-            <div className="flex gap-2">
-              <button onClick={() => setUndoTarget(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 py-2.5 rounded-xl font-bold text-slate-600">取消</button>
-              <button onClick={submitUndoRequest} className="flex-1 bg-slate-900 hover:bg-slate-800 text-white py-2.5 rounded-xl font-bold">{userRole === 'admin' ? '確認更正' : '送出申請'}</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* 月底結算逾期處理 Modal */}
       {isMonthEndModalOpen && (
@@ -702,7 +597,7 @@ export default function Tab2PersonalSchedule({
                             : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
                         }`}
                       >
-                        <span className="text-xs font-bold">2. 未取消{userRole === 'admin' ? '（免計罰）' : ''}</span>
+                        <span className="text-xs font-bold">2. 未取消</span>
                         <span className="text-[10px] opacity-75 font-normal">學生沒來忘記取消</span>
                       </button>
                     </div>
@@ -725,7 +620,7 @@ export default function Tab2PersonalSchedule({
                     <div>
                       <input
                         type="text"
-                        value={draft.reason}
+                        value={draft.reason || ''}
                         onChange={e => {
                           const val = e.target.value;
                           setSettlementDrafts(prev => ({
@@ -745,14 +640,7 @@ export default function Tab2PersonalSchedule({
             <div className="bg-amber-50/80 p-3 rounded-2xl border border-amber-200 text-amber-900 text-[11px] leading-relaxed shrink-0 space-y-1">
               <p className="font-bold">※ 月底結算規則說明：</p>
               <p>• 選擇「未簽到」：系統自動扣除學生堂數，認列授課鐘點費。</p>
-              {userRole === 'admin' ? (
-                <p>• 選擇「未取消（免計罰）」：不扣學生堂數、不計罰，免送審直接結案。</p>
-              ) : (
-                <p>• 選擇「未取消」：不扣學生堂數，並累積老師逾期取消次數。</p>
-              )}
-              <p className="text-rose-700 font-black">
-                • 若月底前未處理，系統將自動結算為「老師逾期取消」。
-              </p>
+              <p>• 選擇「未取消」：不扣學生堂數，直接取消（超時取消）並自動順延補排。</p>
             </div>
 
             <div className="pt-1 flex gap-2 border-t border-slate-100 shrink-0">

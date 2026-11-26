@@ -1,7 +1,7 @@
 'use client';
 import { genId } from '../utils/id';
 import React, { useState, useMemo } from 'react';
-import { Plus, X, Sparkles, UserPlus, Copy, Check } from 'lucide-react';
+import { Plus, X, Sparkles, UserPlus, Copy, Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { 
   getExactTimestamp, 
   ScheduleEngine, 
@@ -9,19 +9,41 @@ import {
   ScheduleEngineResult 
 } from '../mockData';
 
-import { formatRules, isOverdueUnsettled, DEFAULT_BUSINESS_HOURS } from '../utils/bookingRules';
-import { systemAlert } from '../utils/systemAlert';
+import { formatRules, isOverdueUnsettled, isArchivedStudent, countScheduledLessons, archiveConfirmMessage, matchesStudent, DAY_HOURS, REVIEW_TAG } from '../utils/bookingRules';
+import { useNow } from '../utils/useToday';
+import { systemAlert, systemConfirm } from '../utils/systemAlert';
 
 // 維持原有引用相容：StudentDetailView 已拆分至獨立檔案
 export { default as StudentDetailView } from './StudentDetailView';
+
+// 封存切換開關：開啟＝已封存
+function ArchiveToggle({ archived, name, onToggle }: { archived: boolean; name: string; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={archived}
+      aria-label={`封存學員 ${name}`}
+      title={archived ? '解除封存（恢復上課）' : '封存學員'}
+      onClick={e => { e.stopPropagation(); onToggle(); }}
+      className="shrink-0 p-1.5 -m-1.5 inline-flex items-center"
+    >
+      <span className={`relative inline-block w-8 h-[18px] rounded-full transition-colors ${archived ? 'bg-slate-500' : 'bg-slate-200'}`}>
+        <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${archived ? 'translate-x-3.5' : ''}`} />
+      </span>
+    </button>
+  );
+}
 
 // ==========================================
 // 1. 第一層：學生管理清單
 // ==========================================
 export default function Tab3StudentManagement({ 
-  systemBaseDate,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, addLog, onSmartBook, showToast, teachers, bookings, calendarBookings, onSign,
-  userRole, businessHours, priorityGrid, getPriorityHint
+  today,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, addLog, onSmartBook, showToast, teachers, bookings, onSign,
+  userRole, priorityGrid, getPriorityHint, onUpdateStudent
 }: any) {
+  const now = useNow();
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [sortField, setSortField] = useState<'name' | 'next'>('name');
   const [sortDesc, setSortDesc] = useState(false);
 
@@ -34,7 +56,7 @@ export default function Tab3StudentManagement({
   const [isSubmitting, setIsSubmitting] = useState(false); // 防連點送出鎖
   
   // 體驗課專屬欄位
-  const todayStr = systemBaseDate ;
+  const todayStr = today;
   const [trialDate, setTrialDate] = useState(todayStr);
   const [trialHour, setTrialHour] = useState('14');
   const [trialMin, setTrialMin] = useState('00');
@@ -50,7 +72,7 @@ export default function Tab3StudentManagement({
   const [scheduleModalResult, setScheduleModalResult] = useState<ScheduleEngineResult | null>(null);
   const [isCopied, setIsCopied] = useState(false);
 
-  const hours = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+  const hours = DAY_HOURS;
   const minutes = ['00', '10', '20', '30', '40', '50'];
 
   const myStudents = useMemo(() => students.filter((s: any) => s.teacherId === currentUserId), [students, currentUserId]);
@@ -59,7 +81,7 @@ export default function Tab3StudentManagement({
     // 透過 Set 進行嚴格 ID 防呆去重，重複項直接濾除，解決報錯與雙重渲染
     const seenIds = new Set<string>();
     const list = myStudents.filter((s: any) => {
-      if (s.status !== 'active') return false;
+      if (isArchivedStudent(s)) return false;
       if (seenIds.has(s.id)) return false;
       seenIds.add(s.id);
       return true;
@@ -72,6 +94,8 @@ export default function Tab3StudentManagement({
     });
     return list;
   }, [myStudents, sortField, sortDesc]);
+
+  const archivedStudents = useMemo(() => myStudents.filter(isArchivedStudent), [myStudents]);
 
   // 體驗課時段：他人優先時段即時提示
   const trialPriorityHint: string | null = isCreateModalOpen && createMode === 'trial'
@@ -87,6 +111,19 @@ export default function Tab3StudentManagement({
         lessonType: trialLessonType,
       }) ?? null
     : null;
+
+  // 列表開關：封存需確認，解除封存一鍵還原
+  const handleToggleArchive = async (s: any) => {
+    if (isArchivedStudent(s)) {
+      onUpdateStudent({ id: s.id, status: 'active' });
+      showToast(`學員 [${s.name}] 已恢復上課`);
+      return;
+    }
+    const ok = await systemConfirm(archiveConfirmMessage(s.name, countScheduledLessons(bookings, s)));
+    if (!ok) return;
+    onUpdateStudent({ id: s.id, status: 'archived' });
+    showToast(`學員 [${s.name}] 已移至封存`);
+  };
 
   const handleSort = (field: 'name' | 'next') => {
     if (sortField === field) setSortDesc(!sortDesc);
@@ -125,7 +162,7 @@ export default function Tab3StudentManagement({
       const trialH = parseInt(trialHour, 10);
       const trialM = parseInt(trialMin, 10);
 
-      // 體驗課走全站統一預約入口（時間限制 / 教室調度 / 衝堂 / 非營業時間送審）
+      // 體驗課走全站統一預約入口（時間限制 / 教室調度 / 衝堂 / 非優先送審）
       const bookingOk = await onSmartBook(
         {
           date: trialDate,
@@ -218,8 +255,7 @@ export default function Tab3StudentManagement({
       addLog?.(`新增正式學員：${newStudentName}（初始 ${initialCreditsNum} 堂）`, '學員資料', 'gray', newStudentName, currentUserId);
 
       if (!isNoRegular && newRegularStudent.credits > 0) {
-        // 排課引擎使用含改室審核衍生資料的課表（新教室佔位、原教室釋出）
-        const engine = new ScheduleEngine(calendarBookings || bookings, teachers, studentsMap);
+        const engine = new ScheduleEngine(bookings, teachers, studentsMap);
         const result = engine.generateSchedule({
           sid: newId,
           sName: newStudentName,
@@ -228,11 +264,18 @@ export default function Tab3StudentManagement({
           slots: newRules,
           startFromDate: todayStr,
           todayStr,
-          businessHours: businessHours || DEFAULT_BUSINESS_HOURS,
           priorityGrid: priorityGrid || {},
           userRole,
           mode: 'replace_future'
         });
+
+        // 與學生頁自動排課一致：有待審課堂時送出前先確認
+        if ((result.nonPriorityCount ?? 0) > 0 &&
+          !await systemConfirm(`⚠️ 有 ${result.nonPriorityCount} 堂為其他老師優先時段（14 天前預約），排入後需經管理員審核，是否繼續進行排課？`)) {
+          showToast(`正式學員 [${newStudentName}] 建立成功（尚未排課）`);
+          closeModal();
+          return;
+        }
 
         if (result.newRecords.length > 0) {
           onAddBookings(result.newRecords);
@@ -271,7 +314,7 @@ export default function Tab3StudentManagement({
       <div className="flex-1 overflow-y-auto bg-white rounded-2xl border border-slate-200 shadow-2xs">
         <table className="w-full text-left border-collapse text-xs relative">
           <thead className="sticky top-0 bg-slate-50 z-10">
-            {/* 表頭徹底移除「類別」，僅保留 姓名、下堂課、剩餘堂數 */}
+            {/* 表頭徹底移除「類別」，僅保留 姓名、下堂課、剩餘堂數、封存開關 */}
             <tr className="text-slate-500 font-bold border-b border-slate-200 text-[11px] select-none">
               <th className="py-3 px-3 cursor-pointer hover:bg-slate-100 transition" onClick={() => handleSort('name')}>
                 姓名 {sortField === 'name' ? (sortDesc ? '▼' : '▲') : ''}
@@ -279,18 +322,19 @@ export default function Tab3StudentManagement({
               <th className="py-3 px-3 cursor-pointer hover:bg-slate-100 transition" onClick={() => handleSort('next')}>
                 下堂課 {sortField === 'next' ? (sortDesc ? '▼' : '▲') : ''}
               </th>
-              <th className="py-3 px-3 text-right">剩餘堂數</th>
+              <th className="py-3 px-3 text-right whitespace-nowrap">剩餘堂數</th>
+              <th className="py-3 px-3 text-center whitespace-nowrap">封存</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 font-mono">
             {sortedActive.length === 0 && (
-              <tr><td colSpan={3} className="text-center py-8 text-slate-400 font-sans font-bold">目前無學員資料</td></tr>
+              <tr><td colSpan={4}className="text-center py-8 text-slate-400 font-sans font-bold">目前無學員資料</td></tr>
             )}
             {sortedActive.map((s: any) => {
               // 檢查該學員是否有逾期未簽/未處理之課堂
               const hasOverdueUnsigned = bookings?.some((b: any) => 
-                (b.studentId === s.id || b.studentName === s.name) &&
-                isOverdueUnsettled(b, todayStr)
+                matchesStudent(s, b.studentId, b.studentName) &&
+                isOverdueUnsettled(b, now)
               );
 
               return (
@@ -319,11 +363,45 @@ export default function Tab3StudentManagement({
                   <td className={`py-3.5 px-3 text-right font-black ${s.credits <= 5 ? 'text-rose-600 bg-rose-50/60' : 'text-slate-800'}`}>
                     {s.credits}
                   </td>
+                  {/* 整格攔截點擊，避免誤觸開關周圍時進入詳情頁 */}
+                  <td className="py-3.5 px-3 text-center cursor-default" onClick={e => e.stopPropagation()}>
+                    <ArchiveToggle archived={false} name={s.name} onToggle={() => handleToggleArchive(s)} />
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+      </div>
+
+      {/* 已封存學員名單 */}
+      <div className="shrink-0 bg-white rounded-2xl border border-slate-200 shadow-2xs px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setArchivedOpen(!archivedOpen)}
+          aria-expanded={archivedOpen}
+          className="w-full flex justify-between items-center text-[11px] font-bold text-slate-400 py-1 hover:text-slate-600 transition"
+        >
+          <span>📥 已封存學員（{archivedStudents.length} 位）</span>
+          {archivedOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </button>
+        {archivedOpen && (
+          <div className="space-y-2 text-xs pt-2 pb-1 max-h-[35vh] overflow-y-auto">
+            {archivedStudents.length === 0 && <p className="text-center py-2 text-slate-300 font-bold">目前沒有已封存學員</p>}
+            {archivedStudents.map((s: any) => (
+              <div key={s.id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center gap-2 shadow-2xs">
+                <button type="button" onClick={() => onSelectStudent(s.id)} className="font-bold text-slate-500 hover:underline text-left">
+                  {s.name}
+                  <span className="ml-2 text-[10px] text-slate-400 font-mono">剩餘 {s.credits} 堂</span>
+                </button>
+                <div className="shrink-0 flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-bold">已封存</span>
+                  <ArchiveToggle archived name={s.name} onToggle={() => handleToggleArchive(s)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 新增學員彈窗 (體驗課衝堂檢測 / 正式學員各時段獨立類別) */}
@@ -416,7 +494,7 @@ export default function Tab3StudentManagement({
                         onChange={e => setTrialHour(e.target.value)}
                         className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
                       >
-                        {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}
+                        {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
                       </select>
                     </div>
                     <div>
@@ -526,7 +604,7 @@ export default function Tab3StudentManagement({
                                 onChange={e => handleUpdateNewRule(index, 'roomType', e.target.value)}
                                 className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
                               >
-                                <option value="small">🟢 小</option>
+                                <option value="small" disabled={r.lessonType === '1v2'}>🟢 小</option>
                                 <option value="large">🟣 大</option>
                               </select>
                             </div>
@@ -553,7 +631,7 @@ export default function Tab3StudentManagement({
                                     onChange={e => handleUpdateNewTime(index, 'h', e.target.value)}
                                     className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
                                   >
-                                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}
+                                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
                                   </select>
                                 </div>
                                 <div>
@@ -634,10 +712,9 @@ export default function Tab3StudentManagement({
               {scheduleModalResult.message}
             </div>
 
-            {((scheduleModalResult.afterHoursCount ?? 0) + (scheduleModalResult.nonPriorityCount ?? 0)) > 0 && (
+            {(scheduleModalResult.nonPriorityCount ?? 0) > 0 && (
               <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
-                ⏳ 其中 {(scheduleModalResult.afterHoursCount ?? 0) + (scheduleModalResult.nonPriorityCount ?? 0)} 堂需經管理員審核
-                （非營業審核 {scheduleModalResult.afterHoursCount ?? 0} 堂、非優先審核 {scheduleModalResult.nonPriorityCount ?? 0} 堂），核准前標示為待審核。
+                ⏳ 其中 {scheduleModalResult.nonPriorityCount} 堂為{REVIEW_TAG}，需經管理員核准，核准前標示為待審核。
               </div>
             )}
 

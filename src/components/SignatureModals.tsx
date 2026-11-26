@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { PenTool, X, RotateCcw, Check } from 'lucide-react';
-import { getSignatureWindowStatus, REVIEW_TAG } from '../utils/bookingRules';
+import { formatSignedTime, getSignatureWindowStatus, isFutureLesson, REVIEW_TAG } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
 
 // ==========================================
@@ -148,11 +148,13 @@ export function CanvasPad({
 interface BookingStatusBadgeProps {
   booking: any;
   onZoomSignature?: (data: { url: string; time: string }) => void;
-  /** 有效但尚未簽到的課堂是否顯示「尚未開始」（明細列表用） */
-  showUpcoming?: boolean;
+  /** 有效但尚未簽到的課堂顯示「尚未開始 / 待簽到」（明細列表用） */
+  showLessonState?: boolean;
+  /** 已簽到課堂在標籤旁顯示簽到時間（明細列表用） */
+  showSignedTime?: boolean;
 }
 
-export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }: BookingStatusBadgeProps) {
+export function BookingStatusBadge({ booking: b, onZoomSignature, showLessonState, showSignedTime }: BookingStatusBadgeProps) {
   if (!b) return null;
     return (
     <div className="flex items-center gap-1.5 flex-wrap">
@@ -164,46 +166,39 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }
         >
           ⚡ 系統代簽
         </span>
-      ) : b.settlementType === 'unattended_no_credit_deducted' ? (
-        /* 2. 未到課（不扣堂） */
-        <span className="text-[10px] bg-slate-200 text-slate-600 font-bold px-2 py-0.5 rounded-full shadow-2xs">
-          ✕ 未到課
-        </span>
       ) : b.isLateSigned ? (
-        /* 3. 逾期補簽 (金黃色標籤) */
+        /* 2. 逾期補簽 (金黃色標籤) */
         <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 font-black px-1.5 py-0.5 rounded shadow-2xs">
           補簽
         </span>
       ) : b.signed ? (
-        /* 4. 正常親簽 (綠色標籤) */
+        /* 3. 正常親簽 (綠色標籤) */
         <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300 font-black px-1.5 py-0.5 rounded shadow-2xs">
           已簽到
         </span>
       ) : b.status === 'cancelled_normal' ? (
-        /* 5. 取消類 */
-        b.cancelReason === 'after_hours_rejected' ? (
-          <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非營業駁回</span>
-        ) : b.cancelReason === 'non_priority_rejected' ? (
+        /* 4. 取消類（超時取消附帶取消當下時間） */
+        b.cancelReason === 'non_priority_rejected' ? (
           <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非優先駁回</span>
+        ) : b.isLateCancel ? (
+          <>
+            <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold shadow-2xs" title="超時取消（24H 內）">超時取消</span>
+            {b.cancelledAt && <span className="text-[10px] text-slate-400 font-mono">{b.cancelledAt}</span>}
+          </>
         ) : (
           <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold shadow-2xs">正常取消</span>
         )
-      ) : b.status === 'special_rejected' ? (
-        <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">計罰取消</span>
-      ) : b.status === 'special_approved' ? (
-        <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold shadow-2xs">免罰取消</span>
       ) : b.status === 'special_pending' ? (
-        /* 6. 待審核：區分非營業時間 / 非優先申請 / 24H 內異動 */
-        b.pendingKind === 'after_hours' ? (
-          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG.after_hours}</span>
-        ) : b.pendingKind === 'non_priority' ? (
-          <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG.non_priority}</span>
-        ) : (
-          <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">異動審核</span>
-        )
-      ) : showUpcoming ? (
+        <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG}</span>
+      ) : !showLessonState ? null : isFutureLesson(b.date, b.startHour, b.startMin) ? (
         <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full shadow-2xs">尚未開始</span>
-      ) : null}
+      ) : (
+        <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-bold shadow-2xs">待簽到</span>
+      )}
+
+      {showSignedTime && b.signed && (
+        <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">（{formatSignedTime(b)}）</span>
+      )}
 
       {/* 簽名筆跡縮圖 (僅在有手寫筆跡且傳入縮放 callback 時呈現) */}
       {b.signatureData?.startsWith('data:image') && onZoomSignature && (
@@ -228,7 +223,6 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showUpcoming }
 interface CanvasPadModalProps {
   signModalTarget: any; // 支援傳入 bookingId 字串或 booking 物件
   bookings: any[];
-  systemBaseDate: string;
   onClose: () => void;
   onSign: (bookingId: string, url: string, timestamp: string, isLate: boolean) => void;
   getExactTimestamp: () => string;
@@ -245,13 +239,13 @@ function SignTooEarlyGate({ onClose }: { onClose: () => void }) {
 }
 
 export function CanvasPadModal(props: CanvasPadModalProps) {
-  const { signModalTarget, bookings, systemBaseDate, onClose } = props;
+  const { signModalTarget, bookings, onClose } = props;
   if (!signModalTarget) return null;
 
   const targetId =
     typeof signModalTarget === 'object' && signModalTarget !== null ? signModalTarget.id : signModalTarget;
   const bk = bookings.find((b: any) => b.id === targetId);
-  const windowStatus = bk ? getSignatureWindowStatus(bk, systemBaseDate) : 'open';
+  const windowStatus = bk ? getSignatureWindowStatus(bk) : 'open';
   if (windowStatus === 'too_early') return <SignTooEarlyGate onClose={onClose} />;
   return <CanvasPadModalBody {...props} isOverOneHourLate={windowStatus === 'late_over_1h'} />;
 }
@@ -259,7 +253,6 @@ export function CanvasPadModal(props: CanvasPadModalProps) {
 function CanvasPadModalBody({
   signModalTarget,
   bookings,
-  systemBaseDate,
   onClose,
   onSign,
   getExactTimestamp,
@@ -302,11 +295,9 @@ function CanvasPadModalBody({
         <CanvasPad
           onCancel={onClose}
           onConfirm={(url: string) => {
-            // 比對日期：小於系統基準日即為逾期補簽
-            const isLate = targetBk ? targetBk.date < systemBaseDate : true;
-
+            // 補簽與紅字提示同一口徑：晚於課堂結束 1 小時以上
             if (typeof onSign === 'function') {
-              onSign(targetBookingId, url, getExactTimestamp(), isLate);
+              onSign(targetBookingId, url, getExactTimestamp(), isOverOneHourLate);
             }
 
             onClose();

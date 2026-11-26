@@ -31,15 +31,14 @@ export const systemAlert = (message: string, title?: string): void => {
 };
 
 // ------------------------------------------
-// 自訂確認 / 輸入彈窗（取代原生 confirm / prompt，回傳 Promise）
+// 自訂確認彈窗（取代原生 confirm，回傳 Promise）
 // ------------------------------------------
 export interface SystemDialogRequest {
-  kind: 'confirm' | 'prompt';
   title: string;
   message: string;
   confirmText?: string;
   cancelText?: string;
-  resolve: (value: boolean | string | null) => void;
+  resolve: (value: boolean) => void;
 }
 
 type DialogListener = (r: SystemDialogRequest) => void;
@@ -69,13 +68,6 @@ const splitTitle = (message: string, title?: string) => {
 export const systemConfirm = (message: string, title?: string): Promise<boolean> =>
   new Promise(resolve => {
     const { title: t, body } = splitTitle(message, title);
-    if (dialogListener) dialogListener({ kind: 'confirm', title: t, message: body, resolve: v => resolve(!!v) });
+    if (dialogListener) dialogListener({ title: t, message: body, resolve });
     else resolve(typeof window !== 'undefined' ? window.confirm(`${t}\n${body}`) : false);
-  });
-
-/** 取代 prompt()：確定 → 字串，取消 → null */
-export const systemPrompt = (message: string, title = '請輸入'): Promise<string | null> =>
-  new Promise(resolve => {
-    if (dialogListener) dialogListener({ kind: 'prompt', title, message, resolve: v => resolve(typeof v === 'string' ? v : null) });
-    else resolve(typeof window !== 'undefined' ? window.prompt(message) : null);
   });

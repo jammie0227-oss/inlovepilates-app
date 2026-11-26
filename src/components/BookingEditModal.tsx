@@ -2,11 +2,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, AlertTriangle } from 'lucide-react';
 import { formatTimeStr, formatDateWithDay } from '../mockData';
-import type { BusinessHoursConfig, StudentItem, TeacherProfile } from '../types';
+import type { StudentItem, TeacherProfile } from '../types';
 import {
   BUSINESS_MINUTES,
-  getDisplayHours,
-  DEFAULT_BUSINESS_HOURS,
+  DAY_HOURS,
   isWithin24Hours as isWithin24HoursRule,
   validateAndBuildBooking,
 } from '../utils/bookingRules';
@@ -22,7 +21,6 @@ export interface BookingEditConfirmPayload {
   roomType: 'large' | 'small';
   lessonType: '1v1' | '1v2';
   isCancel: boolean;
-  reason: string;
   /** 系統自動調整教室 / 大教室讓位時的提示 */
   notice?: string;
   /** 需同步自動移至小教室的既有 1v1 課堂（改期搶大教室時的讓位） */
@@ -33,16 +31,15 @@ interface BookingEditModalProps {
   /** 正在編輯的預約；為 null 時不渲染 */
   booking: any | null;
   userRole: 'admin' | 'teacher';
-  /** 全局基準日 'YYYY-MM-DD'，用於計算「距開課是否小於 24 小時」 */
-  systemBaseDate: string;
+  /** 今天 'YYYY-MM-DD' */
+  today: string;
   /** 全部預約（供教室自動連動計算衝突） */
   bookings?: any[];
   /** 標題顯示的學員名稱；未提供時取 booking.studentName */
   studentName?: string;
-  /** 待審核課堂：僅能取消，不顯示改期 / 改室欄位 */
+  /** 非優先審核中的課堂：僅能取消，不顯示改期 / 改室欄位 */
   cancelOnly?: boolean;
   /** 以下供共用驗證 validateAndBuildBooking 使用 */
-  businessHours?: BusinessHoursConfig;
   priorityGrid?: PriorityGrid;
   teachers?: Record<string, TeacherProfile>;
   students?: StudentItem[];
@@ -55,11 +52,10 @@ const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
 export default function BookingEditModal({
   booking,
   userRole,
-  systemBaseDate,
+  today,
   bookings = [],
   studentName,
   cancelOnly = false,
-  businessHours = DEFAULT_BUSINESS_HOURS,
   priorityGrid = {},
   teachers = {},
   students = [],
@@ -71,9 +67,8 @@ export default function BookingEditModal({
   const [min, setMin] = useState('00');
   const [room, setRoom] = useState<'large' | 'small'>('small');
   const [lessonType, setLessonType] = useState<'1v1' | '1v2'>('1v1');
-  const [reason, setReason] = useState('');
 
-  // 每次開啟（booking 變動）重設表單與事由
+  // 每次開啟（booking 變動）重設表單
   useEffect(() => {
     if (!booking) return;
     setDate(booking.date);
@@ -81,7 +76,6 @@ export default function BookingEditModal({
     setMin(pad(booking.startMin));
     setRoom(booking.roomType || 'small');
     setLessonType(booking.lessonType || '1v1');
-    setReason('');
   }, [booking]);
 
   const isUnchanged = useMemo(() => {
@@ -97,9 +91,8 @@ export default function BookingEditModal({
 
   if (!booking) return null;
 
-  const needsReason =
-    userRole !== 'admin' &&
-    isWithin24HoursRule(booking.date, booking.startHour, booking.startMin, systemBaseDate);
+  // 僅供提示：24 小時內取消仍直接生效，只標註超時取消
+  const isLateWindow = isWithin24HoursRule(booking.date, booking.startHour, booking.startMin);
 
   // 教室自動連動：切換課程類別時帶入預設教室（1v2 → 大、1v1 → 小）
   const handleLessonTypeChange = (next: '1v1' | '1v2') => {
@@ -109,11 +102,6 @@ export default function BookingEditModal({
 
   const handleConfirm = (isCancel: boolean) => {
     if (!isCancel && isUnchanged) return;
-    if (needsReason && !reason.trim()) {
-      systemAlert('距上課時間小於 24 小時，請務必填寫異動事由供管理員審核！');
-      return;
-    }
-
     let finalRoom = room;
     let notice: string | undefined;
     let autoSwaps: AutoSwapItem[] | undefined;
@@ -137,8 +125,7 @@ export default function BookingEditModal({
           lessonType,
         },
         userRole,
-        systemBaseDate,
-        businessHours,
+        today,
         priorityGrid,
         bookings,
         teachers,
@@ -165,7 +152,6 @@ export default function BookingEditModal({
       roomType: finalRoom,
       lessonType,
       isCancel,
-      reason: reason.trim(),
       notice,
       autoSwaps,
     });
@@ -227,8 +213,8 @@ export default function BookingEditModal({
             <div>
               <label className="font-bold text-slate-600 block mb-1">時 (Hour)</label>
               <select value={hour} onChange={e => setHour(e.target.value)} className={`${selectCls} font-mono`}>
-                {getDisplayHours(businessHours).map(h => (
-                  <option key={h} value={pad(h)}>{h}</option>
+                {DAY_HOURS.map(h => (
+                  <option key={h} value={pad(h)}>{pad(h)}</option>
                 ))}
               </select>
             </div>
@@ -261,20 +247,10 @@ export default function BookingEditModal({
         </div>
         )}
 
-        {/* 一般老師距開課小於 24 小時：必填事由 */}
-        {needsReason && (
-          <div className="space-y-1.5 p-2.5 bg-amber-50 border border-amber-200 rounded-2xl animate-in fade-in">
-            <div className="flex items-center gap-1.5 text-amber-900 font-bold text-[11px]">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>{cancelOnly ? '⚠️ 逾時取消（距上課小於 24 小時），須填事由送審：' : '⚠️ 距上課小於 24 小時，請務必填寫異動事由：'}</span>
-            </div>
-            <textarea
-              value={reason}
-              onChange={e => setReason(e.target.value)}
-              rows={2}
-              placeholder="請詳細填寫取消或改期原因（例如：學員發燒急診檢附收據、臨時加班等）..."
-              className="w-full bg-white border border-amber-300 rounded-xl p-2 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-amber-500 font-sans shadow-2xs placeholder:text-slate-400"
-            />
+        {isLateWindow && (
+          <div className="flex items-start gap-1.5 p-2.5 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 font-bold text-[11px] leading-relaxed">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>距開課小於 24 小時：取消直接生效（不扣學員堂數），紀錄標註「超時取消（24H 內）」。</span>
           </div>
         )}
 

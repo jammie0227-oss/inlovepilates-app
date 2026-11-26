@@ -11,15 +11,22 @@ import type {
 const fmtTime = (hour: number, min: number) =>
   `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 
-// 判定是否為已釋出空位的課堂：
-// 一般取消、免罰取消、計罰取消皆已釋出；24H 內異動/取消待審（special_pending）亦釋出。
-// 例外：送審中的新預約（非營業時間 / 非優先申請）要卡住時段，管理員駁回後才釋出。
-export const isHoldingPendingKind = (pendingKind?: string) =>
-  pendingKind === 'after_hours' || pendingKind === 'non_priority';
+// 判定是否為已釋出空位的課堂：僅「已取消」釋出；非優先審核中的預約仍卡住時段
+export const isCancelledSlot = (status: string) => status === 'cancelled_normal';
 
-export const isCancelledSlot = (status: string, pendingKind?: string) => {
-  if (status === 'special_pending') return !isHoldingPendingKind(pendingKind);
-  return status === 'cancelled_normal' || status === 'special_approved' || status === 'special_rejected';
+type SlotLike = Pick<BookingItem, 'date' | 'startHour' | 'startMin'> & { durationMins?: number };
+
+const slotRange = (b: SlotLike): [number, number] => {
+  const [y, m, d] = b.date.split('-').map(Number);
+  const start = Date.UTC(y, m - 1, d) / 60000 + b.startHour * 60 + b.startMin;
+  return [start, start + (b.durationMins || 50)];
+};
+
+/** 兩堂課時間是否重疊；以絕對分鐘比較，跨午夜的課會延伸到隔日 */
+export const slotsOverlap = (a: SlotLike, b: SlotLike): boolean => {
+  const [aStart, aEnd] = slotRange(a);
+  const [bStart, bEnd] = slotRange(b);
+  return aStart < bEnd && bStart < aEnd;
 };
 
 // 全域衝堂防呆檢測引擎（含角色權限隱私遮罩與換室建議）
@@ -54,47 +61,39 @@ export const checkGlobalConflict = ({
   studentsMap: Record<string, StudentItem>;
   excludeBookingId?: string;
 }): ConflictCheckResult => {
-  const reqStart = startHour * 60 + startMin;
-  const reqEnd = reqStart + durationMins;
+  const request: SlotLike = { date: dateStr, startHour, startMin, durationMins };
 
   // 1. 檢查同教室是否有預約佔用
   for (const b of existingBookings) {
-    if (isCancelledSlot(b.status, b.pendingKind)) continue; // 已取消的課堂空間全空，不計入衝堂
-    if (b.isReleasedGhost) continue; // 改室審核中的原教室提示：時段已釋出
+    if (isCancelledSlot(b.status)) continue; // 已取消的課堂空間全空，不計入衝堂
     if (excludeBookingId && b.id === excludeBookingId) continue;
-    if (b.date !== dateStr) continue;
+    if (!slotsOverlap(request, b)) continue;
 
     const bStart = b.startHour * 60 + b.startMin;
     const bEnd = bStart + (b.durationMins || 50);
-
-    const isOverlapping = !(reqEnd <= bStart || reqStart >= bEnd);
-    if (!isOverlapping) continue;
+    const endHour = Math.floor(bEnd / 60) % 24;
 
     const tObj = teachersMap[b.teacherId];
     const teacherLabel = tObj?.name || '老師';
     const studentLabel = b.studentName || '學員';
     const roomLabel = b.roomType === 'large' ? '大教室' : '小教室';
-    const timeRangeStr = `${fmtTime(b.startHour, b.startMin)} ~ ${fmtTime(Math.floor(bEnd / 60), bEnd % 60)}`;
+    const timeRangeStr = `${fmtTime(b.startHour, b.startMin)} ~ ${fmtTime(endHour, bEnd % 60)}`;
 
     // 教室空間衝突
     if (b.roomType === roomType) {
       // 檢查另一間教室是否為空（狀況 E 換室建議）
       const otherRoom: 'large' | 'small' = roomType === 'large' ? 'small' : 'large';
       const isOtherRoomFree = !existingBookings.some(ob => {
-        if (isCancelledSlot(ob.status, ob.pendingKind)) return false;
-        if (ob.isReleasedGhost) return false;
+        if (isCancelledSlot(ob.status)) return false;
         if (excludeBookingId && ob.id === excludeBookingId) return false;
-        if (ob.date !== dateStr || ob.roomType !== otherRoom) return false;
-        const obStart = ob.startHour * 60 + ob.startMin;
-        const obEnd = obStart + (ob.durationMins || 50);
-        return !(reqEnd <= obStart || reqStart >= obEnd);
+        return ob.roomType === otherRoom && slotsOverlap(request, ob);
       });
 
       // 1v2 課程絕對不能排入小教室
       const canSuggestSwap = isOtherRoomFree && !(lessonType === '1v2' && otherRoom === 'small');
 
       // 依照身分提供遮罩訊息
-      const exactRange = `${fmtTime(b.startHour, b.startMin)}–${fmtTime(Math.floor(bEnd / 60), bEnd % 60)}`;
+      const exactRange = `${fmtTime(b.startHour, b.startMin)}–${fmtTime(endHour, bEnd % 60)}`;
       const reasonMsg = userRole === 'admin'
         ? `【無法預約】衝堂提醒：${teacherLabel} 老師 ${exactRange} ${studentLabel} (${b.lessonType}) 在${roomLabel}已有預約`
         : b.teacherId === teacherId

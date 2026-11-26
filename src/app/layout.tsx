@@ -15,6 +15,15 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "InLove Pilates",
   description: "InLove Pilates system",
+  manifest: "/manifest.json?v=3",
+  icons: {
+    icon: [
+      { url: "/favicon.ico?v=3", sizes: "any" },
+      { url: "/icon.png?v=3", type: "image/png", sizes: "64x64" },
+    ],
+    shortcut: "/favicon.ico?v=3",
+    apple: "/apple-touch-icon.png?v=3",
+  },
 };
 
 export const viewport: Viewport = {

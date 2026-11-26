@@ -4,8 +4,21 @@ import React, { useState, useMemo } from 'react';
 import { Users, FileSpreadsheet, ChevronDown, ChevronUp, Mail, ArrowLeft, Edit3, X, UserPlus, Check, Lock } from 'lucide-react';
 import { BookingStatusBadge } from './SignatureModals';
 import { PRESET_COLORS, formatTimeStr, formatDateWithDay } from '../mockData';
-import { deriveMonthKeys, formatMonthKey, getTeacherStats as computeTeacherStats, monthKeyOf } from '../utils/bookingRules';
+import { deriveMonthKeys, deriveTeacherMonthKeys, formatMonthKey, getTeacherStats as computeTeacherStats, monthKeyOf, REVIEW_TAG } from '../utils/bookingRules';
+import type { TeacherMonthStats } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
+import { useNow } from '../utils/useToday';
+
+/** 一般老師月份表的數值欄（月份列與合計列共用） */
+const StatCells = ({ s }: { s: TeacherMonthStats }) => (
+  <>
+    <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
+    <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
+    <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
+    <td className="py-2.5 px-1 text-slate-700">{s.unsettled}</td>
+    <td className="py-2.5 px-1 text-slate-700">{s.upcoming}</td>
+  </>
+);
 
 // 根據 Tab 5 的 priorityGrid 自動計算老師時段結論 (例如 W1 08:00-12:00 / W2 14:00-15:00)
 export const generatePriorityConclusion = (teacherId: string, grid: Record<string, any>) => {
@@ -58,21 +71,26 @@ export default function Tab4TeachersManagement({
   teachers, 
   setTeachers, 
   bookings, 
-  systemBaseDate,
+  today,
   priorityGrid,
   onSelectTeacher, 
   showToast,
   isAddTeacherOpen,
   setIsAddTeacherOpen
 }: any) {
-  const monthKeys = useMemo(() => deriveMonthKeys(bookings, systemBaseDate), [bookings, systemBaseDate]);
-  const currentMonthKey = monthKeys.includes(monthKeyOf(systemBaseDate)) ? monthKeyOf(systemBaseDate) : monthKeys[0];
+  const now = useNow();
+  const isAdmin = userRole === 'admin';
+  // 查詢月份選單（新到舊，一定包含當月）：管理員取全館課堂月份；一般老師取自己的全部課堂月份
+  const monthKeys = useMemo(
+    () => deriveMonthKeys(isAdmin ? bookings : bookings.filter((b: any) => b.teacherId === currentUserId), today),
+    [bookings, today, isAdmin, currentUserId],
+  );
+  const currentMonthKey = monthKeys.includes(monthKeyOf(today)) ? monthKeyOf(today) : monthKeys[0];
   const [pickedMonth, setSelectedMonth] = useState<string | null>(null);
   const selectedMonth = pickedMonth && monthKeys.includes(pickedMonth) ? pickedMonth : currentMonthKey;
   const [accordionOpen, setAccordionOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [colorPickerTarget, setColorPickerTarget] = useState<string | null>(null);
-  const [expandStats, setExpandStats] = useState(false);
 
   // 新增老師表單狀態
   const [newTeacherName, setNewTeacherName] = useState('');
@@ -97,9 +115,26 @@ export default function Tab4TeachersManagement({
 
   // 老師與管理員共用同一個統計口徑（bookingRules.getTeacherStats）
   const getTeacherStats = (tId: string, monthKey: string = selectedMonth) =>
-    computeTeacherStats(bookings, monthKey, tId);
+    computeTeacherStats(bookings, monthKey, tId, now);
 
   const activeTeachers = Object.values(teachers).filter((t: any) => t.isActive);
+  // 一般老師：以查詢月份 M 為基準的 M-4 ～ M+1 各月統計（新到舊），合計僅加總表內月份
+  const myMonthRows = isAdmin
+    ? []
+    : deriveTeacherMonthKeys(bookings, selectedMonth, currentUserId)
+        .map(k => ({ key: k, stats: getTeacherStats(currentUserId, k) }));
+  const myTotals = myMonthRows.reduce<TeacherMonthStats>(
+    (sum, { stats }) => ({
+      count1v1: sum.count1v1 + stats.count1v1,
+      count1v2: sum.count1v2 + stats.count1v2,
+      total: sum.total + stats.total,
+      unsettled: sum.unsettled + stats.unsettled,
+      upcoming: sum.upcoming + stats.upcoming,
+      normalCancel: sum.normalCancel + stats.normalCancel,
+      lateCancel: sum.lateCancel + stats.lateCancel,
+    }),
+    { count1v1: 0, count1v2: 0, total: 0, unsettled: 0, upcoming: 0, normalCancel: 0, lateCancel: 0 },
+  );
   const archivedTeachers = Object.values(teachers).filter((t: any) => !t.isActive);
 
   // 儲存新增老師
@@ -164,63 +199,59 @@ export default function Tab4TeachersManagement({
           <table className="w-full text-center border-collapse text-xs font-mono">
             <thead>
               <tr className="bg-slate-50 text-slate-500 font-bold border-b border-slate-200 text-[11px]">
-                <th className="py-2.5 px-1 text-left font-sans">{userRole === 'admin' ? '老師' : '月份'}</th>
+                <th className="py-2.5 px-1 text-left font-sans">{isAdmin ? '老師' : '月份'}</th>
                 <th className="py-2.5 px-1">1v1</th>
                 <th className="py-2.5 px-1">1v2</th>
                 <th className="py-2.5 px-1 font-black text-slate-900">總堂數</th>
-                <th className="py-2.5 px-1">超時取消</th>
-                <th className="py-2.5 px-1">正常取消</th>
-                <th className="py-2.5 px-1">計罰次數</th>
+                <th className="py-2.5 px-1">未結堂數</th>
+                <th className="py-2.5 px-1">預排堂數</th>
+                {isAdmin && <th className="py-2.5 px-1">取消堂數</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {userRole === 'admin' ? (
-                <>
-                  {activeTeachers.map((t: any) => {
-                    const s = getTeacherStats(t.id);
-                    return (
-                      <tr key={t.id} className="hover:bg-slate-50 transition">
-                        {/* 補齊代表色圓點與字體樣式，與下方清單完全統一 */}
-                        <td className="py-2.5 px-2 font-bold font-sans text-left">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`w-2.5 h-2.5 rounded-full ${t.color} shrink-0 shadow-2xs`} />
-                            <span className={`font-black ${t.text}`}>{t.name}</span>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
-                        <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
-                        <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
-                        <td className="py-2.5 px-1 text-slate-700">{s.lateCancel}</td>
-                        <td className="py-2.5 px-1 text-slate-700">{s.normalCancel}</td>
-                        <td className="py-2.5 px-1 font-black text-rose-600">{s.penalty}</td>
-                      </tr>
-                    );
-                  })}
-                </>
-              ) : (
-                monthKeys.slice(0, expandStats ? monthKeys.length : 5).map(k => {
-                  const s = getTeacherStats(currentUserId, k);
-                  return (
-                    <tr key={k} className={k === selectedMonth ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
-                      <td className="py-2.5 px-1 text-left font-bold font-sans text-slate-900">
-                        {formatMonthKey(k)} {k === currentMonthKey ? '(當月)' : ''}
-                      </td>
-                      <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
-                      <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
-                      <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
-                      <td className="py-2.5 px-1 text-slate-700">{s.lateCancel}</td>
-                      <td className="py-2.5 px-1 text-slate-700">{s.normalCancel}</td>
-                      <td className="py-2.5 px-1 font-black text-rose-600">{s.penalty}</td>
-                    </tr>
-                  );
-                })
+              {!isAdmin && myMonthRows.map(({ key, stats }) => (
+                <tr key={key} className={key === selectedMonth ? 'bg-rose-50/50' : 'hover:bg-slate-50 transition'}>
+                  <td className="py-2.5 px-2 font-bold text-left text-slate-900 whitespace-nowrap">{key.replace('-', '/')}</td>
+                  <StatCells s={stats} />
+                </tr>
+              ))}
+              {!isAdmin && (
+                <tr className="bg-slate-50 border-t-2 border-slate-200 font-black">
+                  <td className="py-2.5 px-2 text-left font-sans text-slate-900 whitespace-nowrap">合計</td>
+                  <StatCells s={myTotals} />
+                </tr>
               )}
+              {isAdmin && activeTeachers.map((t: any) => {
+                const s = getTeacherStats(t.id);
+                return (
+                  <tr key={t.id} className="hover:bg-slate-50 transition">
+                    {/* 補齊代表色圓點與字體樣式，與下方清單完全統一 */}
+                    <td className="py-2.5 px-2 font-bold font-sans text-left">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-2.5 h-2.5 rounded-full ${t.color} shrink-0 shadow-2xs`} />
+                        <span className={`font-black ${t.text}`}>{t.name}</span>
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
+                    <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
+                    <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
+                    <td className="py-2.5 px-1 text-slate-700">{s.unsettled}</td>
+                    <td className="py-2.5 px-1 text-slate-700">{s.upcoming}</td>
+                    <td className="py-2.5 px-1 text-slate-700">
+                      <span className="font-black">{s.normalCancel + s.lateCancel}</span>
+                      <span className="block text-[10px] text-slate-400 font-sans whitespace-nowrap">
+                        正常 {s.normalCancel}・<span className="text-rose-600">超時 {s.lateCancel}</span>
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-          {userRole !== 'admin' && monthKeys.length > 5 && (
-            <button onClick={() => setExpandStats(!expandStats)} className="w-full text-center py-2 text-slate-400 hover:text-slate-600 font-bold text-[11px] mt-1 transition">
-              {expandStats ? '收合紀錄 ▲' : '展開更早紀錄 ▼'}
-            </button>
+          <p className="text-[10px] text-slate-400 font-bold pt-2">未結堂數：已開課但尚未簽到、未取消（逾期待處理）</p>
+          <p className="text-[10px] text-slate-400 font-bold">預排堂數：尚未開課的預約（含{REVIEW_TAG}）</p>
+          {!isAdmin && (
+            <p className="text-[10px] text-slate-400 font-bold">合計：上表所列月份（全部逾期課堂請見個人課表「逾期未處理」）</p>
           )}
         </div>
       </div>
@@ -240,8 +271,8 @@ export default function Tab4TeachersManagement({
             {filteredBookings.map((b: any) => {
               const t = teachers[b.teacherId];
               return (
-                <div key={b.id} className="py-2.5 flex justify-between items-center hover:bg-slate-50 transition px-1 rounded-lg">
-                  <div>
+                <div key={b.id} className="py-2.5 flex flex-wrap justify-between items-center gap-x-2 gap-y-1 hover:bg-slate-50 transition px-1 rounded-lg">
+                  <div className="min-w-0">
                     <span className="font-bold text-slate-800">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
                     <span className="ml-2 font-sans font-bold text-slate-600">
                       {b.studentName} {userRole === 'admin' && (
@@ -254,7 +285,9 @@ export default function Tab4TeachersManagement({
                   </div>
                   
                   {/* 精確狀態標籤：全站統一由 BookingStatusBadge 渲染 */}
-                  <BookingStatusBadge booking={b} showUpcoming />
+                  <div className="ml-auto">
+                    <BookingStatusBadge booking={b} showLessonState showSignedTime />
+                  </div>
                 </div>
               );
             })}
@@ -520,8 +553,8 @@ export default function Tab4TeachersManagement({
 // ==========================================
 // 2. 第二層：老師檔案內頁 (優先排課時段移至此處資訊欄完整呈現)
 // ==========================================
-export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGrid, showToast, bookings = [], systemBaseDate }: any) {
-  const [email, setEmail] = useState(teacher.email);
+export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGrid, showToast, bookings = [], today }: any) {
+  const [email, setEmail] = useState(teacher.email || '');
   const [phone, setPhone] = useState(teacher.phone);
   const [isEditingInfo, setIsEditingInfo] = useState(false);
   const [expandStats, setExpandStats] = useState(false);
@@ -531,12 +564,13 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
     return generatePriorityConclusion(teacher.id, priorityGrid);
   }, [teacher.id, priorityGrid]);
 
-  const monthKeys = useMemo(() => deriveMonthKeys(bookings, systemBaseDate), [bookings, systemBaseDate]);
-  const currentMonthKey = monthKeyOf(systemBaseDate);
+  const monthKeys = useMemo(() => deriveMonthKeys(bookings, today), [bookings, today]);
+  const currentMonthKey = monthKeyOf(today);
+  const now = useNow();
   const historyStats = useMemo(() => monthKeys.map(k => {
-    const st = computeTeacherStats(bookings, k, teacher.id);
-    return { month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, late: st.lateCancel, penalty: st.penalty, normal: st.normalCancel };
-  }), [bookings, monthKeys, teacher.id, currentMonthKey]);
+    const st = computeTeacherStats(bookings, k, teacher.id, now);
+    return { month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, unsettled: st.unsettled, upcoming: st.upcoming, late: st.lateCancel, normal: st.normalCancel };
+  }), [bookings, monthKeys, teacher.id, currentMonthKey, now]);
 
   return (
     <div className="space-y-4 animate-in fade-in slide-in-from-right-4 pb-20">
@@ -573,7 +607,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
           </div>
         ) : (
           <div className="space-y-2 text-slate-600 font-mono bg-slate-50 p-3 rounded-xl border border-slate-100 shadow-2xs">
-            <p>• Email: <span className="font-bold text-slate-800">{teacher.email}</span></p>
+            <p>• Email: <span className="font-bold text-slate-800">{teacher.email || '未提供'}</span></p>
             <p>• 電話: <span className="font-bold text-slate-800">{teacher.phone}</span></p>
             {/* 優先排課時段已完整移至此處 */}
             <div className="pt-1 border-t border-slate-200/60 flex items-start gap-1">
@@ -584,7 +618,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
         )}
         
         <div className="pt-2 border-t border-slate-100">
-          <button onClick={() => showToast(`已發送系統開通邀請信至 ${teacher.email}`)} className="w-full bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 py-2.5 rounded-xl font-bold flex items-center justify-center gap-1 transition shadow-2xs">
+          <button onClick={() => showToast(teacher.email ? `已發送系統開通邀請信至 ${teacher.email}` : '尚未填寫 Email，請先編輯資料後再寄送')} className="w-full bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 py-2.5 rounded-xl font-bold flex items-center justify-center gap-1 transition shadow-2xs">
             <Mail className="w-4 h-4" /> 寄送邀請信
           </button>
         </div>
@@ -592,6 +626,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
 
       <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-2xs space-y-3">
         <h3 className="font-black text-slate-800 text-sm">個人歷史授課統計</h3>
+        <div className="overflow-x-auto">
         <table className="w-full text-center border-collapse text-xs font-mono">
           <thead>
             <tr className="bg-slate-50 text-slate-500 border-b border-slate-200">
@@ -599,9 +634,10 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
               <th className="py-2.5">1v1</th>
               <th className="py-2.5">1v2</th>
               <th className="py-2.5 font-black text-slate-800">總堂數</th>
+              <th className="py-2.5">未結</th>
+              <th className="py-2.5">預排</th>
               <th className="py-2.5">超時</th>
               <th className="py-2.5">正常</th>
-              <th className="py-2.5">計罰</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -611,13 +647,15 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
                 <td className="py-2.5">{s.v1}</td>
                 <td className="py-2.5">{s.v2}</td>
                 <td className="py-2.5 font-black text-slate-900">{s.total}</td>
+                <td className="py-2.5">{s.unsettled}</td>
+                <td className="py-2.5">{s.upcoming}</td>
                 <td className="py-2.5">{s.late}</td>
                 <td className="py-2.5">{s.normal}</td>
-                <td className="py-2.5 font-black text-rose-600">{s.penalty}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
         {historyStats.length > 5 && (
           <button onClick={() => setExpandStats(!expandStats)} className="w-full text-center py-2 text-slate-400 hover:text-slate-600 font-bold text-[11px] transition mt-1 bg-white border border-slate-100 rounded-xl shadow-2xs">
             {expandStats ? '收合紀錄 ▲' : '展開更早紀錄 ▼'}

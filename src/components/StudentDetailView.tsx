@@ -1,7 +1,7 @@
 'use client';
 import { genId } from '../utils/id';
 import React, { useState, useMemo } from 'react';
-import { Plus, Edit3, Clock, PenTool, ZoomIn, X, AlertCircle, History, CreditCard, Sparkles, FileText, AlertTriangle, Copy, Check } from 'lucide-react';
+import { Plus, Edit3, Clock, PenTool, ZoomIn, X, AlertCircle, History, CreditCard, Sparkles, FileText, AlertTriangle, Copy, Check, Archive, ArchiveRestore } from 'lucide-react';
 import { 
   formatTimeStr, 
   getExactTimestamp, 
@@ -12,12 +12,13 @@ import {
 
 import { BookingStatusBadge, CanvasPad, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DEFAULT_BUSINESS_HOURS, getDisplayHours, isBookingOverdue, isOverdueUnsettled, occupiesQuota, matchesStudent, isRuleOffHours, getScheduleQuota } from '../utils/bookingRules';
+import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DAY_HOURS, REVIEW_TAG, isOverdueUnsettled, getSignatureWindowStatus, isPendingApproval, occupiesQuota, matchesStudent, getScheduleQuota, isArchivedStudent, archiveConfirmMessage } from '../utils/bookingRules';
 import { systemAlert, systemConfirm } from '../utils/systemAlert';
+import { useNow } from '../utils/useToday';
 
 export default function StudentDetailView({ 
-  systemBaseDate,student, onBack, bookings, calendarBookings, onUpdateStudent, onPurchase, onSign, onUpdateBookingNote, onAddBookings, onExecuteReschedule, onSmartBook, showToast, addLog, currentUserId, teachers, userRole,
-  students, businessHours, priorityGrid, getPriorityHint,
+  today,student, onBack, bookings, onUpdateStudent, onPurchase, onSign, onUpdateBookingNote, onAddBookings, onExecuteReschedule, onSmartBook, showToast, addLog, currentUserId, teachers, userRole,
+  students, priorityGrid, getPriorityHint,
   externalBuyModalOpen, setExternalBuyModalOpen
 }: any) {
   const [expandHistory, setExpandHistory] = useState(false);
@@ -28,17 +29,12 @@ export default function StudentDetailView({
   // 變更預約狀態 (三行新排版 + 逾期事由備註)
   const [editingBooking, setEditingBooking] = useState<any>(null);
 
-  // 任務 4：逾期未簽回報彈窗狀態
-  const [reportingBooking, setReportingBooking] = useState<any>(null);
-  const [reportType, setReportType] = useState<'attended_unsigned' | 'unattended_not_cancelled'>('attended_unsigned');
-  const [reportNote, setReportNote] = useState('');
-
   // 預排課程卡片右上角「+」臨時排課彈窗狀態
   const [isQuickBookModalOpen, setIsQuickBookModalOpen] = useState(false);
   const initialPreset = getStudentBookingPreset(student, userRole);
   const [quickBookForm, setQuickBookForm] = useState({
     roomType: initialPreset.roomType,
-    date: systemBaseDate,
+    date: today,
     hour: '14',
     minute: '00',
     lessonType: initialPreset.lessonType
@@ -74,27 +70,25 @@ export default function StudentDetailView({
   
   const studentBookings = bookings.filter((b: any) => matchesStudent(student, b.studentId, b.studentName));
   
-  const upcomingAndScheduled = studentBookings.filter((b: any) => b.status === 'confirmed' && (!isBookingOverdue(b.date, systemBaseDate) && !b.signed)).sort((a: any, b: any) => a.date.localeCompare(b.date));
-  const historyLessons = studentBookings.filter((b: any) => b.status === 'confirmed' && (isBookingOverdue(b.date, systemBaseDate) || b.signed)).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  const now = useNow();
+  // 逾期未處理（已開課、未簽、未取消）與預排互斥，口徑同 Tab 2 / Tab 4
+  const overdueBookings = studentBookings.filter((b: any) => isOverdueUnsettled(b, now));
+  const upcomingAndScheduled = studentBookings.filter((b: any) => occupiesQuota(b) && !isOverdueUnsettled(b, now)).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  const historyLessons = studentBookings.filter((b: any) => b.status === 'confirmed' && (b.signed || isOverdueUnsettled(b, now))).sort((a: any, b: any) => a.date.localeCompare(b.date));
   const purchases = [...(student.purchases || [])].sort((a: any, b: any) => b.date.localeCompare(a.date));
 
   // 堂數透支檢核：預排堂數超過剩餘堂數
-  // 已佔用額度統一以 occupiesQuota 計算（confirmed / special_pending 且未簽）
+  // 已佔用額度統一以 occupiesQuota 計算（含審核中，且未簽）
   const occupiedQuotaCount = studentBookings.filter(occupiesQuota).length;
   const isCreditsOverdrawn = occupiedQuotaCount > student.credits;
   const overdrawnCount = occupiedQuotaCount - student.credits;
 
-  // 排課 / 衝堂用課表：含改室審核衍生資料（新教室佔位、原教室釋出）
-  const scheduleSource = calendarBookings || bookings;
   // 自動排課額度明細（歷史簽到已於簽到當下扣堂，不重複扣除）
-  const quota = getScheduleQuota(scheduleSource, student, systemBaseDate);
-  const roomChangeIds = new Set(scheduleSource.filter((b: any) => b.roomChangePending).map((b: any) => b.id));
+  const quota = getScheduleQuota(bookings, student, now);
 
-  const effectiveBusinessHours = businessHours || DEFAULT_BUSINESS_HOURS;
-
-  const hours = getDisplayHours(businessHours || DEFAULT_BUSINESS_HOURS);
+  const hours = DAY_HOURS;
   const minutes = BUSINESS_MINUTES;
-  const todayStr = systemBaseDate;
+  const todayStr = today;
 
   const handleOpenRuleModal = () => {
     const preset = getStudentBookingPreset(student, userRole);
@@ -203,26 +197,26 @@ export default function StudentDetailView({
   const horizonWarning = useMemo(() => {
     if (!autoScheduleOpen || userRole === 'admin' || student.credits <= 0) return false;
     try {
-      const engine = new ScheduleEngine(scheduleSource, teachers, Object.fromEntries([[student.id, student]]));
+      const engine = new ScheduleEngine(bookings, teachers, Object.fromEntries([[student.id, student]]));
       return (['append_remaining', 'replace_future'] as const).some(mode => {
         const r = engine.generateSchedule({
           sid: student.id, sName: student.name, teacherId: student.teacherId,
           credits: student.credits, slots: student.rules, startFromDate: todayStr, todayStr,
-          businessHours: businessHours || DEFAULT_BUSINESS_HOURS, priorityGrid: priorityGrid || {},
+          priorityGrid: priorityGrid || {},
           userRole, mode, maxWeeksLimit: 16,
           targetCount: mode === 'append_remaining' ? quota.availableToSchedule : quota.replaceTotal
         });
         return !!r.hitHorizonLimit;
       });
     } catch { return false; }
-  }, [autoScheduleOpen, userRole, student, scheduleSource, teachers, todayStr, businessHours, priorityGrid, quota.availableToSchedule, quota.replaceTotal]);
+  }, [autoScheduleOpen, userRole, student, bookings, teachers, todayStr, priorityGrid, quota.availableToSchedule, quota.replaceTotal]);
 
   // 執行自動排課（支援模式：'append_remaining' 接續排課 或 'replace_future' 重整未來）
   const handleRunAutoSchedule = async (mode: 'append_remaining' | 'replace_future', startFromToday: boolean = true) => {
     if (student.credits <= 0) return systemAlert('學員剩餘堂數不足，請先購買續課');
 
     const engine = new ScheduleEngine(
-      scheduleSource, 
+      bookings, 
       teachers, 
       Object.fromEntries([[student.id, student]])
     );
@@ -237,7 +231,6 @@ export default function StudentDetailView({
       slots: student.rules,
       startFromDate: baseReDate,
       todayStr,
-      businessHours: businessHours || DEFAULT_BUSINESS_HOURS,
       priorityGrid: priorityGrid || {},
       userRole,
       mode,
@@ -247,12 +240,8 @@ export default function StudentDetailView({
 
     if (result.success) {
       // 實際有課堂以待審排入（僅一般老師；管理員直接生效）時才確認，與實際排入行為一致
-      const pendingKinds = [
-        (result.afterHoursCount ?? 0) > 0 ? '非營業時間' : '',
-        (result.nonPriorityCount ?? 0) > 0 ? '其他老師的優先時段' : '',
-      ].filter(Boolean).join('或');
-      if (pendingKinds) {
-        if (!await systemConfirm(`此時段為${pendingKinds}，排入後需經管理員審核，是否繼續進行排課？`)) return;
+      if ((result.nonPriorityCount ?? 0) > 0) {
+        if (!await systemConfirm(`⚠️ 有 ${result.nonPriorityCount} 堂為其他老師優先時段（14 天前預約），排入後需經管理員審核，是否繼續進行排課？`)) return;
       }
       // 依據引擎判斷，保留安全保護區（已簽到、已逾期、已取消），僅替換或追加純預約
       const cleanBookings = bookings.filter((b: any) => !result.removedBookingIds.includes(b.id));
@@ -279,6 +268,22 @@ export default function StudentDetailView({
 
   const openRescheduleModal = (b: any) => setEditingBooking(b);
 
+  // 封存 / 解除封存：負責老師本人或管理員可操作
+  const isArchived = isArchivedStudent(student);
+  const canArchive = userRole === 'admin' || student.teacherId === currentUserId;
+
+  const handleArchive = async () => {
+    const ok = await systemConfirm(archiveConfirmMessage(student.name, upcomingAndScheduled.length));
+    if (!ok) return;
+    onUpdateStudent({ id: student.id, status: 'archived' });
+    showToast(`學員 [${student.name}] 已移至封存`);
+  };
+
+  const handleRestore = () => {
+    onUpdateStudent({ id: student.id, status: 'active' });
+    showToast(`學員 [${student.name}] 已恢復上課`);
+  };
+
   // 取消 / 改期一律交給 page 的 handleExecuteReschedule（含衝堂檢查、讓位、取消後自動順延）
   const handleConfirmReschedule = (p: BookingEditConfirmPayload) => {
     if (!editingBooking) return;
@@ -291,7 +296,6 @@ export default function StudentDetailView({
       p.roomType,
       p.isCancel,
       p.lessonType,
-      p.reason,
       p.autoSwaps
     );
     setEditingBooking(null);
@@ -300,6 +304,19 @@ export default function StudentDetailView({
   return (
     <div className="space-y-3.5 animate-in fade-in slide-in-from-right-4 duration-200 pb-20">
       
+      {isArchived && (
+        <div className="bg-slate-100 border border-slate-300 p-3 rounded-2xl text-xs text-slate-600 flex items-center justify-between gap-2 shadow-2xs">
+          <span className="font-bold flex items-center gap-1.5">
+            <Archive className="w-4 h-4 shrink-0" /> 此學員已封存，無法新增預約或自動排課
+          </span>
+          {canArchive && (
+            <button onClick={handleRestore} className="shrink-0 whitespace-nowrap bg-emerald-100 text-emerald-700 px-2.5 py-1.5 rounded-xl text-[11px] font-bold hover:bg-emerald-200 transition shadow-2xs flex items-center gap-1">
+              <ArchiveRestore className="w-3.5 h-3.5" /> 解除封存（恢復上課）
+            </button>
+          )}
+        </div>
+      )}
+
       {/* 頂部排課規則與筆記卡片 */}
       <div className="bg-white p-3.5 rounded-3xl border border-slate-200 shadow-2xs space-y-2.5">
         <div className="flex justify-between items-center font-bold text-slate-600 text-xs">
@@ -314,12 +331,14 @@ export default function StudentDetailView({
             >
               <Edit3 className="w-3.5 h-3.5"/>
             </button>
-            <button 
-              onClick={() => setAutoScheduleOpen(true)} 
-              className="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-xl font-bold flex items-center gap-1 border border-indigo-100 hover:bg-indigo-100 transition shadow-2xs"
-            >
-              <Sparkles className="w-3 h-3"/> 自動排課
-            </button>
+            {!isArchived && (
+              <button 
+                onClick={() => setAutoScheduleOpen(true)} 
+                className="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-xl font-bold flex items-center gap-1 border border-indigo-100 hover:bg-indigo-100 transition shadow-2xs"
+              >
+                <Sparkles className="w-3 h-3"/> 自動排課
+              </button>
+            )}
           </div>
         </div>
         
@@ -352,23 +371,25 @@ export default function StudentDetailView({
           <h3 className="font-black text-slate-800 flex items-center gap-1.5 text-sm">
             <Clock className="w-4 h-4 text-sky-600" /> 預排課程
           </h3>
-          <button 
-            onClick={() => {
-              const preset = getStudentBookingPreset(student, userRole);
-              setQuickBookForm({
-                date: systemBaseDate,
-                hour: '14',
-                minute: '00',
-                roomType: preset.roomType,
-                lessonType: preset.lessonType
-              });
-              setIsQuickBookModalOpen(true);
-            }}
-            className="w-7 h-7 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl text-rose-600 flex items-center justify-center font-bold transition shadow-2xs active:scale-95"
-            title="臨時預約排課"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
+          {!isArchived && (
+            <button 
+              onClick={() => {
+                const preset = getStudentBookingPreset(student, userRole);
+                setQuickBookForm({
+                  date: today,
+                  hour: '14',
+                  minute: '00',
+                  roomType: preset.roomType,
+                  lessonType: preset.lessonType
+                });
+                setIsQuickBookModalOpen(true);
+              }}
+              className="w-7 h-7 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl text-rose-600 flex items-center justify-center font-bold transition shadow-2xs active:scale-95"
+              title="臨時預約排課"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
         <div className="space-y-2">
@@ -380,12 +401,12 @@ export default function StudentDetailView({
                   <span className={`w-2.5 h-2.5 rounded-full shadow-2xs ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
                   <span className="font-black text-slate-800 font-mono text-sm">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
                   <span className="text-slate-400 font-bold text-[11px]">({b.lessonType})</span>
-                  {roomChangeIds.has(b.id) && (
-                    <span className="shrink-0 whitespace-nowrap text-[10px] bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">改室審核</span>
+                  {isPendingApproval(b) && (
+                    <span className="shrink-0 whitespace-nowrap text-[10px] bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 rounded-full font-black">{REVIEW_TAG}</span>
                   )}
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">{userRole !== 'admin' && roomChangeIds.has(b.id) ? '取消' : '變更'}</button>
+                  <button onClick={() => openRescheduleModal(b)} className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold border border-slate-200 bg-white hover:bg-slate-50 transition">{isPendingApproval(b) ? '取消' : '變更'}</button>
                   <button onClick={() => setSignModalId({ id: b.id, studentName: student.name })} className="bg-rose-500 hover:bg-rose-600 transition text-white px-3 py-1.5 rounded-xl font-black text-[11px] flex items-center gap-1 shadow-xs"><PenTool className="w-3 h-3"/> 簽名</button>
                 </div>
               </div>
@@ -408,38 +429,28 @@ export default function StudentDetailView({
           )}
         </div>
       </div>
-      {/* 判斷並篩選該學員專屬的逾期待處理課堂 */}
-      {(() => {
-        const todayStr = systemBaseDate ; // 根據全局時間基準
-        const overdueBookings = bookings.filter((b: any) => 
-          (b.studentId === student.id || b.studentName === student.name) && 
-          isOverdueUnsettled(b, todayStr)
-        );
-
-        if (overdueBookings.length === 0) return null;
-
-        return (
-          <div className="bg-amber-50 p-3.5 rounded-2xl border border-amber-300 shadow-2xs space-y-3 mt-4">
-            <h4 className="text-amber-900 font-black text-xs flex items-center gap-1.5">
-              <AlertCircle className="w-4 h-4 text-amber-600" /> ⚠️ 此學員有 {overdueBookings.length} 堂逾期未處理課堂
-            </h4>
-            <div className="space-y-2">
-              {overdueBookings.map((b: any) => (
-                <div key={b.id} className="p-3 bg-white rounded-xl border border-amber-200 flex justify-between items-center shadow-2xs">
-                  <div>
-                    <span className="font-mono font-bold text-slate-800 text-sm">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
-                    <span className="ml-2 text-xs text-slate-500 font-sans">{b.roomType === 'large' ? '大教室' : '小教室'} ({b.lessonType})</span>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <button onClick={() => openRescheduleModal(b)} className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold transition">{userRole !== 'admin' && roomChangeIds.has(b.id) ? '取消' : '變更'}</button>
-                    <button onClick={() => setSignModalId(b.id)} className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-xl font-bold transition shadow-xs">補簽</button>
-                  </div>
+      {/* 該學員專屬的逾期待處理課堂 */}
+      {overdueBookings.length > 0 && (
+        <div className="bg-amber-50 p-3.5 rounded-2xl border border-amber-300 shadow-2xs space-y-3 mt-4">
+          <h4 className="text-amber-900 font-black text-xs flex items-center gap-1.5">
+            <AlertCircle className="w-4 h-4 text-amber-600" /> ⚠️ 此學員有 {overdueBookings.length} 堂逾期未處理課堂
+          </h4>
+          <div className="space-y-2">
+            {overdueBookings.map((b: any) => (
+              <div key={b.id} className="p-3 bg-white rounded-xl border border-amber-200 flex justify-between items-center shadow-2xs">
+                <div>
+                  <span className="font-mono font-bold text-slate-800 text-sm">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
+                  <span className="ml-2 text-xs text-slate-500 font-sans">{b.roomType === 'large' ? '大教室' : '小教室'} ({b.lessonType})</span>
                 </div>
-              ))}
-            </div>
+                <div className="flex gap-1.5">
+                  <button onClick={() => openRescheduleModal(b)} className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold transition">變更</button>
+                  <button onClick={() => setSignModalId({ id: b.id, studentName: student.name })} className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-xl font-bold transition shadow-xs">{getSignatureWindowStatus(b, now) === 'late_over_1h' ? '補簽' : '簽名'}</button>
+                </div>
+              </div>
+            ))}
           </div>
-        );
-      })()}
+        </div>
+      )}
       {/* 購課合約紀錄 */}
       <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-2xs space-y-4 text-xs">
         <h3 className="font-black text-slate-800 flex items-center gap-1.5"><CreditCard className="w-4 h-4 text-rose-500" /> 購課合約紀錄</h3>
@@ -508,6 +519,13 @@ export default function StudentDetailView({
         </div>
       </div>
 
+      {/* 封存學員 */}
+      {canArchive && !isArchived && (
+        <button onClick={handleArchive} className="w-full py-2.5 rounded-2xl text-xs font-bold bg-white border border-slate-200 text-slate-500 hover:bg-slate-100 transition shadow-2xs flex items-center justify-center gap-1.5">
+          <Archive className="w-4 h-4" /> 封存學員
+        </button>
+      )}
+
       {/* ========================================================
           臨時新增預約 Modal (標準三行規格，學員鎖定當前學員)
       ======================================================== */}
@@ -550,7 +568,7 @@ export default function StudentDetailView({
                     onChange={(e) => setQuickBookForm({ ...quickBookForm, hour: e.target.value })} 
                     className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
                   >
-                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}
+                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
                   </select>
                 </div>
                 <div>
@@ -619,12 +637,11 @@ export default function StudentDetailView({
       {/* 變更 / 取消預約 Modal (共用元件) */}
       <BookingEditModal
         booking={editingBooking}
-        cancelOnly={userRole !== 'admin' && !!editingBooking && roomChangeIds.has(editingBooking.id)}
+        cancelOnly={!!editingBooking && isPendingApproval(editingBooking)}
         userRole={userRole}
-        systemBaseDate={systemBaseDate || todayStr}
-        bookings={scheduleSource}
+        today={today}
+        bookings={bookings}
         studentName={student.name}
-        businessHours={businessHours}
         priorityGrid={priorityGrid}
         teachers={teachers}
         students={students}
@@ -705,7 +722,7 @@ export default function StudentDetailView({
               </div>
               <div className="flex justify-between border-b border-slate-200/60 pb-1.5">
                 <span className="text-slate-400 font-sans">簽署時間：</span>
-                <span className="font-bold text-slate-800">{selectedContract.signedAt || `${selectedContract.date} 14:00:00`}</span>
+                <span className="font-bold text-slate-800">{selectedContract.signedAt || selectedContract.date.replace(/-/g, '/')}</span>
               </div>
               <div className="flex justify-between border-b border-slate-200/60 pb-1.5">
                 <span className="text-slate-400 font-sans">購買方案：</span>
@@ -802,7 +819,7 @@ export default function StudentDetailView({
                             onChange={e => handleUpdateTempRule(index, 'roomType', e.target.value)}
                             className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
                           >
-                            <option value="small">🟢 小</option>
+                            <option value="small" disabled={r.lessonType === '1v2'}>🟢 小</option>
                             <option value="large">🟣 大</option>
                           </select>
                         </div>
@@ -811,11 +828,6 @@ export default function StudentDetailView({
                       {/* 第二行：星期、時、分、起始日 */}
                       {r.freq !== '不固定' && (
                         <>
-                          {isRuleOffHours(r, effectiveBusinessHours) && (
-                            <div className="text-[11px] font-black text-rose-600 leading-snug">
-                              ⚠️ 此時段為非營業時間，一般老師排課需經管理員審核
-                            </div>
-                          )}
                           <div className="grid grid-cols-3 gap-2 [&>div]:min-w-0">
                             <div>
                               <label className="font-bold text-slate-600 text-[10px]">星期</label>
@@ -834,7 +846,7 @@ export default function StudentDetailView({
                                 onChange={(e) => handleUpdateTempTime(index, 'h', e.target.value)}
                                 className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
                               >
-                                {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h}</option>)}
+                                {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
                               </select>
                             </div>
                             <div>
@@ -897,19 +909,15 @@ export default function StudentDetailView({
             </div>
 
             <div className="space-y-2.5">
-              {/* 預設時段摘要（非營業時間以紅字提醒） */}
+              {/* 預設時段摘要 */}
               {(student.rules || []).some((r: any) => r.freq !== '不固定') && (
                 <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-[11px] font-bold">
                   <div className="text-slate-500">預設排課時段：</div>
-                  {(student.rules || []).filter((r: any) => r.freq !== '不固定').map((r: any) => {
-                    const off = isRuleOffHours(r, effectiveBusinessHours);
-                    return (
-                      <div key={r.id} className={off ? 'text-rose-600' : 'text-slate-700'}>
-                        {r.freq === '隔週' || r.freq === 'EOW' ? '隔週' : '每週'} {r.lessonType || '1v1'} {r.roomType === 'large' ? '大教室' : '小教室'} 週{r.day} {r.time}
-                        {off && <span className="block font-black">{userRole === 'admin' ? '⚠️ 此時段為非營業時間，管理員排入將直接生效（免審核）' : '⚠️ 此時段為非營業時間，排入後需經管理員審核'}</span>}
-                      </div>
-                    );
-                  })}
+                  {(student.rules || []).filter((r: any) => r.freq !== '不固定').map((r: any) => (
+                    <div key={r.id} className="text-slate-700">
+                      {r.freq === '隔週' || r.freq === 'EOW' ? '隔週' : '每週'} {r.lessonType || '1v1'} {r.roomType === 'large' ? '大教室' : '小教室'} 週{r.day} {r.time}
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -953,7 +961,7 @@ export default function StudentDetailView({
                           {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}
                         </span>
                         <span className="text-slate-400 font-sans font-bold">
-                          {roomChangeIds.has(b.id) && <span className="text-amber-600 mr-1">改室審核</span>}
+                          {isPendingApproval(b) && <span className="text-amber-600 mr-1">{REVIEW_TAG}</span>}
                           ({b.lessonType})
                         </span>
                       </div>
@@ -1026,16 +1034,15 @@ export default function StudentDetailView({
               {scheduleResultModal.message}
             </div>
 
-            {((scheduleResultModal.afterHoursCount ?? 0) + (scheduleResultModal.nonPriorityCount ?? 0)) > 0 && (
+            {(scheduleResultModal.nonPriorityCount ?? 0) > 0 && (
               <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
-                ⏳ 其中 {(scheduleResultModal.afterHoursCount ?? 0) + (scheduleResultModal.nonPriorityCount ?? 0)} 堂需經管理員審核
-                （非營業審核 {scheduleResultModal.afterHoursCount ?? 0} 堂、非優先審核 {scheduleResultModal.nonPriorityCount ?? 0} 堂），核准前標示為待審核。
+                ⏳ 其中 {scheduleResultModal.nonPriorityCount} 堂為{REVIEW_TAG}，需經管理員核准，核准前標示為待審核。
               </div>
             )}
 
             {(scheduleResultModal.remainingUnscheduled ?? 0) > 0 && (
               <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
-                ⚠️ 剩餘 {scheduleResultModal.remainingUnscheduled} 堂因為{scheduleResultModal.hitHorizonLimit ? '超過 3 個月可排課日期' : '時段衝突或公休'}，故沒有排入。
+                ⚠️ 剩餘 {scheduleResultModal.remainingUnscheduled} 堂因為{scheduleResultModal.hitHorizonLimit ? '超過 3 個月可排課日期' : '時段衝突'}，故沒有排入。
               </div>
             )}
 
@@ -1088,125 +1095,10 @@ export default function StudentDetailView({
         <CanvasPadModal
           signModalTarget={signModalId}
           bookings={bookings}
-          systemBaseDate={systemBaseDate}
           onClose={() => setSignModalId(null)}
           onSign={onSign}
           getExactTimestamp={getExactTimestamp}
         />
-      )}
-      {/* ========================================================
-          任務 4：逾期未簽回報彈窗 (學生未簽 vs 學生未取消)
-      ======================================================== */}
-      {reportingBooking && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-black text-slate-800 flex items-center gap-1.5">
-                <span>⏰ 逾期課堂回報</span>
-              </h3>
-              <button onClick={() => setReportingBooking(null)} className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* 課堂摘要 */}
-            <div className="p-2.5 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-2 font-mono font-bold text-slate-700">
-              <span className={`w-2.5 h-2.5 rounded-full ${reportingBooking.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
-              <span>{formatDateWithDay(reportingBooking.date)} {formatTimeStr(reportingBooking.startHour, reportingBooking.startMin)}</span>
-              <span className="text-slate-400 font-sans">({reportingBooking.studentName})</span>
-            </div>
-
-            <div className="space-y-3">
-              <label className="font-black text-slate-700 block">請選擇實際授課狀況：</label>
-
-              {/* 選項 1：學生有來忘記簽 */}
-              <label className={`flex items-start gap-2.5 p-3 rounded-2xl border cursor-pointer transition ${
-                reportType === 'attended_unsigned' 
-                  ? 'bg-amber-50/80 border-amber-300 ring-1 ring-amber-200' 
-                  : 'bg-white border-slate-200 hover:bg-slate-50'
-              }`}>
-                <input
-                  type="radio"
-                  name="reportType"
-                  checked={reportType === 'attended_unsigned'}
-                  onChange={() => setReportType('attended_unsigned')}
-                  className="mt-0.5 text-amber-600 focus:ring-amber-500"
-                />
-                <div className="text-xs">
-                  <span className="font-black text-amber-950 block">學生有來上課（忘記簽名）</span>
-                  <span className="text-[11px] text-amber-800/80 leading-tight block mt-0.5">
-                    月底由系統代結扣除 1 堂課，正常採計老師授課鐘點費，免除違約罰責。
-                  </span>
-                </div>
-              </label>
-
-              {/* 選項 2：學生未到忘記取消 */}
-              <label className={`flex items-start gap-2.5 p-3 rounded-2xl border cursor-pointer transition ${
-                reportType === 'unattended_not_cancelled' 
-                  ? 'bg-rose-50/80 border-rose-300 ring-1 ring-rose-200' 
-                  : 'bg-white border-slate-200 hover:bg-slate-50'
-              }`}>
-                <input
-                  type="radio"
-                  name="reportType"
-                  checked={reportType === 'unattended_not_cancelled'}
-                  onChange={() => setReportType('unattended_not_cancelled')}
-                  className="mt-0.5 text-rose-600 focus:ring-rose-500"
-                />
-                <div className="text-xs">
-                  <span className="font-black text-rose-950 block">學生未到課（忘記取消）</span>
-                  <span className="text-[11px] text-rose-800/80 leading-tight block mt-0.5">
-                    絕對不扣學員堂數。此時段將呈報管理員 Daisy 審核是否計罰老師場地額度。
-                  </span>
-                </div>
-              </label>
-
-              {/* 事由備註欄 */}
-              <div>
-                <label className="font-bold text-slate-600 block mb-1">具體事由說明（選填）：</label>
-                <textarea
-                  value={reportNote}
-                  onChange={e => setReportNote(e.target.value)}
-                  rows={2}
-                  placeholder="例如：學員趕高鐵先行離開，已電話確認 / 學員臨時腹痛口頭請假..."
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-700 outline-none focus:ring-1 focus:ring-rose-400 font-sans shadow-2xs"
-                />
-              </div>
-            </div>
-
-            <div className="pt-2 flex gap-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setReportingBooking(null)}
-                className="flex-1 bg-slate-100 hover:bg-slate-200 transition py-2.5 rounded-xl font-bold text-slate-600 text-xs"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  // 更新該課堂的回報標記
-                  const updatedBookings = bookings.map((b: any) => {
-                    if (b.id === reportingBooking.id) {
-                      return {
-                        ...b,
-                        overdueReport: reportType,
-                        overdueReason: reportNote.trim()
-                      };
-                    }
-                    return b;
-                  });
-                  onAddBookings([], updatedBookings);
-                  showToast('回報成功！系統已登記您的申報紀錄');
-                  setReportingBooking(null);
-                }}
-                className="flex-1 bg-slate-900 hover:bg-slate-800 transition text-white py-2.5 rounded-xl font-bold text-xs shadow-xs"
-              >
-                確認回報
-              </button>
-            </div>
-          </div>
-        </div>
       )}
       {/* 放大檢視簽名憑證 Modal */}
       <SignatureZoomModal

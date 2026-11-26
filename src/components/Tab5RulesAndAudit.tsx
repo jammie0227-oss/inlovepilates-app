@@ -2,7 +2,7 @@
 import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X, Lock } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
-import { calculateFreeCancelQuota, isTaughtBooking, isOverdueUnsettled, getLogSeverity, getReviewTypeLabel, isPendingApproval } from '../utils/bookingRules';
+import { formatTimestamp, getLogSeverity, isLogReadBy, isLogVisibleTo, isPendingApproval, setLogReadBy, REVIEW_TAG } from '../utils/bookingRules';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -10,8 +10,6 @@ export default function Tab5RulesAndAudit({
   teachers, 
   priorityGrid, 
   setPriorityGrid, 
-  businessHours,
-  setBusinessHours,
   bookings = [],
   reviews, 
   onReview, 
@@ -21,24 +19,8 @@ export default function Tab5RulesAndAudit({
   studioRules, 
   setStudioRules, 
   showToast, 
-  addLog,
-  systemBaseDate,
-  isMonthEndOpen,
-  onCloseMonthEnd,
-  onSendReminders,
-  onForceClose
+  onRuleUpdate
 }: any) {
-  const [meExpanded, setMeExpanded] = useState<Record<string, boolean>>({});
-  const [meConfirmOpen, setMeConfirmOpen] = useState(false);
-  const meGroups = useMemo(() => {
-    if (!isMonthEndOpen) return [] as { tId: string; name: string; items: any[] }[];
-    const m = new Map<string, any[]>();
-    (bookings as any[]).filter(b => isOverdueUnsettled(b, systemBaseDate)).forEach(b => m.set(b.teacherId, [...(m.get(b.teacherId) || []), b]));
-    return Array.from(m.entries()).map(([tId, items]) => ({ tId, name: teachers?.[tId]?.name || '老師', items: items.sort((a: any, b: any) => (a.date + a.startHour).localeCompare(b.date + b.startHour)) }));
-  }, [isMonthEndOpen, bookings, systemBaseDate, teachers]);
-  const meTotal = meGroups.reduce((n, g) => n + g.items.length, 0);
-  const closeMe = () => { setMeConfirmOpen(false); onCloseMonthEnd?.(); };
-
   const [slotModal, setSlotModal] = useState<string | null>(null);
   // 指派彈窗草稿：同一時段「不限教室 / 大教室 / 小教室」只能擇一
   const [slotDraft, setSlotDraft] = useState({ all: '', large: '', small: '' });
@@ -68,18 +50,11 @@ export default function Tab5RulesAndAudit({
     return Object.values(teachers).filter((t: any) => t.isActive);
   }, [teachers]);
 
-  // 日誌權限過濾：管理員看全館，一般老師嚴格只看自己
+  // 日誌權限過濾：管理員看全館，一般老師只看自己的通知與全館廣播
   const displayLogs = useMemo(() => {
-    let targetLogs = [...logs];
-    if (userRole !== 'admin') {
-      targetLogs = targetLogs.filter((l: any) => l.teacherId === currentUserId);
-    }
-    return targetLogs.sort((a: any, b: any) => {
-      const aTime = parseInt(a.id?.replace(/\D/g, '') || '0', 10);
-      const bTime = parseInt(b.id?.replace(/\D/g, '') || '0', 10);
-      if (aTime && bTime && aTime !== bTime) return bTime - aTime;
-      return (b.time || '').localeCompare(a.time || '');
-    });
+    const targetLogs = logs.filter((l: any) => isLogVisibleTo(l, userRole, currentUserId));
+    // 依操作時間由新到舊；同一分鐘維持寫入順序（新紀錄在前）。ID 含隨機字元，不可用於排序
+    return targetLogs.sort((a: any, b: any) => (b.time || '').localeCompare(a.time || ''));
   }, [logs, userRole, currentUserId]);
 
   // 需要已讀確認的通知：黃色 / 紅色（灰階一般紀錄不計未讀、不顯示已讀切換）
@@ -96,43 +71,17 @@ export default function Tab5RulesAndAudit({
     [displayLogs, severityFilter]
   );
 
-  // 僅針對「調度」或「改室」計算未讀紅點數量，管理者審核案件不佔用未讀紅點
+  // 僅黃、紅通知計未讀（依目前檢視者各自計算）
   const unreadCount = useMemo(() => {
-    return displayLogs.filter((l: any) => !l.read && isRoomSwapNotice(l)).length;
-  }, [displayLogs]);
+    return displayLogs.filter((l: any) => !isLogReadBy(l, currentUserId) && isRoomSwapNotice(l)).length;
+  }, [displayLogs, currentUserId]);
+
+  // 只變更目前檢視者的已讀狀態
+  const markRead = (ids: Set<string>, read: boolean) =>
+    setLogs((prev: any) => prev.map((l: any) =>
+      ids.has(l.id) ? setLogReadBy(l, currentUserId, read, Object.keys(teachers)) : l));
 
   const pendingReviews = useMemo(() => reviews.filter((r: any) => r.status === 'pending'), [reviews]);
-
-  // 該老師於審核案件所屬月份的：已上堂數 / 免費取消額度 / 已使用次數
-  const getTeacherQuotaInfo = (item: any) => {
-    const month = (item.date || '').slice(0, 7);
-    const completed = (bookings as any[]).filter(b =>
-      b.teacherId === item.teacherId &&
-      (b.date || '').startsWith(month) &&
-      isTaughtBooking(b)
-    ).length;
-    const quota = calculateFreeCancelQuota(completed);
-    const used = (reviews as any[]).filter(r =>
-      r.teacherId === item.teacherId &&
-      r.status === 'approved' &&
-      !r.voided &&
-      (r.reviewType === 'cancel' || r.reviewType === 'reschedule' || !r.reviewType) &&
-      (r.date || '').startsWith(month)
-    ).length;
-    return { completed, quota, used };
-  };
-
-  const updateDayHours = (key: 'weekday' | 'saturday' | 'sunday', patch: any) => {
-    if (userRole !== 'admin' || !setBusinessHours || !businessHours) return;
-    const prev = businessHours[key];
-    const next = { ...prev, ...patch };
-    const name = key === 'weekday' ? '週一至週五' : key === 'saturday' ? '週六' : '週日';
-    const fmt = (c: any) => (c.enabled ? `${String(c.startHour).padStart(2, '0')}:00–${String(c.endHour).padStart(2, '0')}:00` : '公休');
-    if (fmt(prev) !== fmt(next)) {
-      addLog?.(`營業時間設定修改\n${name}：${fmt(prev)} ➔ ${fmt(next)}`, '設定', 'gray', '', currentUserId, undefined, undefined, userRole === 'admin' ? 'Daisy' : undefined);
-    }
-    setBusinessHours({ ...businessHours, [key]: next });
-  };
 
   const toggleReviewExpand = (id: string) => {
     setExpandedReviews(prev => ({ ...prev, [id]: !prev[id] }));
@@ -140,11 +89,6 @@ export default function Tab5RulesAndAudit({
 
   const toggleLogExpand = (id: string) => {
     setExpandedLogIds(prev => ({ ...prev, [id]: !prev[id] }));
-  };
-
-  const isRoomChangeReview = (item: any) => {
-    if (item.reviewType) return item.reviewType === 'room_change';
-    return item.reason?.includes('改教室') || item.reason?.includes('改室');
   };
 
   // 清洗名稱：去除「老師」贅字與「學員」假名
@@ -160,10 +104,10 @@ export default function Tab5RulesAndAudit({
   };
 
   const exportCSV = (type: 'month' | 'all') => {
-    const currentMonth = '10';
+    const currentMonth = formatTimestamp().slice(0, 7); // YYYY/MM
     const logsToExport = type === 'all' 
       ? displayLogs 
-      : displayLogs.filter((l: any) => l.time.startsWith(`${currentMonth}/`));
+      : displayLogs.filter((l: any) => l.time.startsWith(currentMonth));
 
     if (logsToExport.length === 0) return showToast('該範圍內無資料可匯出');
 
@@ -194,7 +138,7 @@ export default function Tab5RulesAndAudit({
         <div className="space-y-3">
           <div className="flex justify-between items-center">
             <h2 className="text-base font-black text-slate-800 flex items-center gap-1.5">
-              <Bell className="w-5 h-5 text-rose-500" /> 24H 逾期/特殊審核
+              <Bell className="w-5 h-5 text-rose-500" /> {REVIEW_TAG}
             </h2>
             <span className="text-xs px-2.5 py-1 bg-rose-100 text-rose-700 font-bold rounded-full shadow-2xs">
               待審：{pendingReviews.length}
@@ -208,7 +152,6 @@ export default function Tab5RulesAndAudit({
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {pendingReviews.map((item: any) => {
-                const isRoomChange = isRoomChangeReview(item);
                 const isExpanded = !!expandedReviews[item.id];
                 const isLargeRoom = !!item.room?.includes('大');
                 const cleanTeacher = (item.teacherName || '老師').replace(/ 老師|老師/g, '').trim();
@@ -227,89 +170,32 @@ export default function Tab5RulesAndAudit({
                         {item.studentName && item.studentName !== '學員' && (
                           <span className="text-slate-700 font-sans font-bold">({item.studentName})</span>
                         )}
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                          isRoomChange 
-                            ? 'bg-purple-50 text-purple-700 border border-purple-200' 
-                            : 'bg-rose-50 text-rose-700 border border-rose-200'
-                        }`}>
-                          {getReviewTypeLabel(isRoomChange ? { reviewType: 'room_change' } : item)}
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-mono bg-rose-50 text-rose-700 border border-rose-200">
+                          {REVIEW_TAG}
                         </span>
                         {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-slate-400 ml-0.5" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-0.5" />}
                       </div>
 
                       <div className="flex gap-1.5 shrink-0">
-                        {(isRoomChange || item.reviewType === 'after_hours' || item.reviewType === 'non_priority' || item.reviewType === 'settlement_undo') ? (
-                          <>
-                            <button 
-                              onClick={() => onReview(item.id, 'approved')} 
-                              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
-                            >
-                              {item.reviewType === 'settlement_undo' ? '核准更正' : '核准'}
-                            </button>
-                            <button 
-                              onClick={() => onReview(item.id, 'rejected')} 
-                              className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
-                            >
-                              駁回
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button 
-                              onClick={() => onReview(item.id, 'approved')} 
-                              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
-                            >
-                              免罰
-                            </button>
-                            <button 
-                              onClick={() => onReview(item.id, 'rejected')} 
-                              className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
-                            >
-                              計罰
-                            </button>
-                          </>
-                        )}
+                        <button 
+                          onClick={() => onReview(item.id, 'approved')} 
+                          className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
+                        >
+                          核准
+                        </button>
+                        <button 
+                          onClick={() => onReview(item.id, 'rejected')} 
+                          className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition shadow-2xs active:scale-95"
+                        >
+                          駁回
+                        </button>
                       </div>
                     </div>
 
-                    {/* 免費特殊取消額度輔助資訊（供管理員裁決免罰/計罰參考） */}
-                    {(item.reviewType === 'cancel' || item.reviewType === 'reschedule' || item.reviewType === 'settlement_undo' || item.reviewType === 'after_hours') && (() => {
-                      const q = getTeacherQuotaInfo(item);
-                      return (
-                        <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
-                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">本月已上 {q.completed} 堂</span>
-                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">免費取消額度 {q.quota} 次</span>
-                          <span className={`px-1.5 py-0.5 rounded ${q.used >= q.quota ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>已使用 {q.used} 次</span>
-                        </div>
-                      );
-                    })()}
-
-                    {isRoomChange && (
-                      <div className="text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-lg px-2 py-1">
-                        核准：確認教室變更並解除審核標示；駁回：原教室仍空閒時退回原教室。不計罰。
-                      </div>
-                    )}
-
-                    {/* 批次單中已到課簽到的課堂提示 */}
-                    {(item.batchBookingIds?.length ?? 0) > 0 && (bookings as any[]).some(b => item.batchBookingIds.includes(b.id) && b.signed) && (
+                    {/* 批次單中已成立（簽到或自動核准）的課堂提示 */}
+                    {(item.batchBookingIds?.length ?? 0) > 0 && (bookings as any[]).some(b => item.batchBookingIds.includes(b.id) && b.status === 'confirmed') && (
                       <div className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
-                        部分課堂已簽到授課：核准 / 駁回僅影響仍待審的課堂。
-                      </div>
-                    )}
-
-                    {/* 同一堂課的異動經過：併單後只裁決一次 */}
-                    {item.history?.length > 0 && (
-                      <div className="text-[10px] text-slate-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 space-y-0.5">
-                        <p className="font-black text-amber-800">異動經過（本堂只裁決一次）</p>
-                        {item.history.map((line: string, i: number) => (
-                          <p key={i} className="break-words">{i + 1}. {line}</p>
-                        ))}
-                      </div>
-                    )}
-                    {(!item.reviewType || item.reviewType === 'cancel' || item.reviewType === 'reschedule') &&
-                      (bookings as any[]).some(b => b.id === item.bookingId && (b.penaltyCount || 0) > 0) && (
-                      <div className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1">
-                        此堂已計罰 1 次，本次按「計罰」不再累加。
+                        部分課堂已簽到或自動核准：核准 / 駁回僅影響仍待審的課堂。
                       </div>
                     )}
 
@@ -317,9 +203,6 @@ export default function Tab5RulesAndAudit({
                     {isExpanded ? (
                       <div className="p-2.5 bg-slate-50 rounded-xl text-xs text-slate-700 space-y-2 border border-slate-100 animate-in fade-in duration-150">
                         <p className="font-medium"><span className="text-slate-400 font-sans">事由：</span>{item.reason}</p>
-                        {item.submittedAt && (
-                          <p className="font-medium"><span className="text-slate-400 font-sans">送審時間：</span><span className="font-mono">{item.submittedAt}</span></p>
-                        )}
                         
                         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-800 pt-1 border-t border-slate-200/60">
                           {/* 原課堂資訊（帶完整教室名稱） */}
@@ -335,26 +218,7 @@ export default function Tab5RulesAndAudit({
                             </span>
                           </div>
 
-                          {/* 若為改室申請，補充顯示欲改至的目標教室 */}
-                          {item.reviewType === 'room_change' && item.reqRoom && (
-                            <div className="flex items-center gap-1 text-purple-700 font-bold font-sans">
-                              <span className="text-slate-400">➔ 改至：</span>
-                              <span>{item.reqRoom === 'large' ? '🟣 大教室' : '🟢 小教室'}</span>
-                            </div>
-                          )}
-
-                          {/* 若為改期申請，統一套用智慧日期格式化 */}
-                          {item.reviewType === 'reschedule' && item.reqDate && (
-                            <div className="flex items-center gap-1 text-rose-600 font-bold font-sans">
-                              <span className="text-slate-400">➔ 改至：</span>
-                              <span>{item.reqRoom === 'large' ? '🟣 大教室' : '🟢 小教室'}</span>
-                              <span className="font-mono font-bold">
-                                {formatDateWithDay(item.reqDate)} {formatTimeStr(item.reqHour ?? 0, item.reqMin ?? 0)}
-                              </span>
-                            </div>
-                          )}
-
-                          {(item.reviewType === 'after_hours' || item.reviewType === 'non_priority') && item.batchBookingIds && item.batchBookingIds.length > 0 && (
+                          {item.batchBookingIds?.length > 0 && (
                             <div className="w-full font-sans text-slate-700 space-y-0.5">
                               <div className="text-slate-400">批次課堂（核准 / 駁回整批一次套用）：</div>
                               {(bookings as any[])
@@ -363,33 +227,16 @@ export default function Tab5RulesAndAudit({
                                 .map(b => (
                                   <div key={b.id} className="font-mono text-[11px]">
                                     {b.roomType === 'large' ? '🟣' : '🟢'} {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)} ({b.lessonType})
-                                    {b.signed ? ' · 已簽到' : !isPendingApproval(b) ? ' · 已取消' : ''}
+                                    {b.signed ? ' · 已簽到' : isPendingApproval(b) ? '' : b.status === 'confirmed' ? ' · 已核准' : ' · 已取消'}
                                   </div>
                                 ))}
                             </div>
                           )}
 
-                          {item.reviewType === 'after_hours' && (
-                            <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
-                              <span className="text-slate-400">類型：</span>
-                              <span className="font-normal text-slate-600">非營業審核（核准後生效、駁回則不成立）</span>
-                            </div>
-                          )}
-
-                          {item.reviewType === 'non_priority' && (
-                            <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
-                              <span className="text-slate-400">類型：</span>
-                              <span className="font-normal text-slate-600">非優先審核（核准後生效、駁回則釋出時段）</span>
-                            </div>
-                          )}
-
-                          {/* 若為結算更正申請，顯示更正事由 */}
-                          {item.reviewType === 'settlement_undo' && item.undoReason && (
-                            <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
-                              <span className="text-slate-400">更正事由：</span>
-                              <span className="font-normal text-slate-600">{item.undoReason}</span>
-                            </div>
-                          )}
+                          <div className="flex items-center gap-1 text-amber-700 font-bold font-sans">
+                            <span className="text-slate-400">類型：</span>
+                            <span className="font-normal text-slate-600">{REVIEW_TAG}（核准後生效、駁回則釋出時段）</span>
+                          </div>
                         </div>
                       </div>
                     ) : (
@@ -398,9 +245,6 @@ export default function Tab5RulesAndAudit({
                         className="text-[11px] text-slate-500 truncate cursor-pointer hover:text-slate-700 pl-1"
                       >
                         {item.reason}
-                        {item.submittedAt && (
-                          <span className="block text-[10px] text-slate-400 font-mono">送審時間：{item.submittedAt}</span>
-                        )}
                       </div>
                     )}
                   </div>
@@ -458,7 +302,7 @@ export default function Tab5RulesAndAudit({
             {/* All已讀：純 Icon */}
             <button 
               onClick={() => { 
-                setLogs((prev: any) => prev.map((l: any) => ({ ...l, read: true }))); 
+                markRead(new Set(displayLogs.map((l: any) => l.id)), true);
                 showToast('已全部標記為已讀'); 
               }} 
               className="p-1.5 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border border-slate-200 rounded-xl transition shadow-2xs"
@@ -508,6 +352,7 @@ export default function Tab5RulesAndAudit({
               const isExpanded = !!expandedLogIds[l.id];
               const { teacherClean, studentClean } = getCleanNames(l);
               const detailContent = l.detail || l.action;
+              const isRead = isLogReadBy(l, currentUserId);
 
               return (
                 <div 
@@ -520,7 +365,7 @@ export default function Tab5RulesAndAudit({
                         ? 'bg-rose-50/80 border-rose-200 hover:bg-rose-100/60' 
                         : 'bg-amber-50/80 border-amber-200 hover:bg-amber-100/60'
                   } ${
-                    !isNormal && l.read ? 'opacity-60 grayscale-[25%]' : 'shadow-2xs font-bold'
+                    !isNormal && isRead ? 'opacity-60 grayscale-[25%]' : 'shadow-2xs font-bold'
                   }`}
                 >
                   {/* 第一行：時間  類別  老師名  學生名 (無老師與學員贅字) */}
@@ -558,12 +403,12 @@ export default function Tab5RulesAndAudit({
                       {/* 核心校正：只有「系統安排調度」或「改室」才需要已讀／未讀切換，其餘紀錄不需顯示 */}
                       {isRoomSwapNotice(l) && (
                         <button 
-                          onClick={() => setLogs(logs.map((i: any) => i.id === l.id ? { ...i, read: !i.read } : i))}
+                          onClick={() => markRead(new Set([l.id]), !isRead)}
                           className={`text-[10px] px-2 py-0.5 rounded-md font-bold border transition ${
-                            l.read ? 'text-slate-400 bg-white/70 border-transparent' : 'text-blue-600 bg-blue-50 border-blue-200 shadow-2xs animate-pulse'
+                            isRead ? 'text-slate-400 bg-white/70 border-transparent' : 'text-blue-600 bg-blue-50 border-blue-200 shadow-2xs animate-pulse'
                           }`}
                         >
-                          {l.read ? '已讀' : '未讀'}
+                          {isRead ? '已讀' : '未讀'}
                         </button>
                       )}
 
@@ -594,60 +439,6 @@ export default function Tab5RulesAndAudit({
           </div>
         )}
       </div>
-
-      {/* 工作室營業時間設定 */}
-      {businessHours && (
-        <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-2xs space-y-2.5 text-xs">
-          <div className="flex justify-between items-center">
-            <h3 className="text-sm font-black text-slate-800">🕘 工作室營業時間設定</h3>
-            {userRole !== 'admin' && <span className="text-[10px] text-slate-400 font-bold">唯讀</span>}
-          </div>
-          {([
-            ['weekday', '週一～週五'],
-            ['saturday', '週六'],
-            ['sunday', '週日'],
-          ] as const).map(([key, label]) => {
-            const cfg = businessHours[key];
-            const isAdmin = userRole === 'admin';
-            return (
-              <div key={key} className="flex items-center gap-2 flex-wrap">
-                <label className="flex items-center gap-1.5 w-24 font-bold text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={cfg.enabled}
-                    disabled={!isAdmin}
-                    onChange={e => updateDayHours(key, { enabled: e.target.checked })}
-                  />
-                  {label}
-                </label>
-                {cfg.enabled ? (
-                  <div className="flex items-center gap-1 font-mono font-bold text-slate-700">
-                    <select
-                      value={cfg.startHour}
-                      disabled={!isAdmin}
-                      onChange={e => updateDayHours(key, { startHour: Math.min(Number(e.target.value), cfg.endHour - 1) })}
-                      className="border border-slate-200 rounded-lg px-1.5 py-1 bg-slate-50 disabled:opacity-70"
-                    >
-                      {Array.from({ length: 16 }, (_, i) => i + 7).map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                    </select>
-                    <span>–</span>
-                    <select
-                      value={cfg.endHour}
-                      disabled={!isAdmin}
-                      onChange={e => updateDayHours(key, { endHour: Math.max(Number(e.target.value), cfg.startHour + 1) })}
-                      className="border border-slate-200 rounded-lg px-1.5 py-1 bg-slate-50 disabled:opacity-70"
-                    >
-                      {Array.from({ length: 17 }, (_, i) => i + 8).map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                    </select>
-                  </div>
-                ) : (
-                  <span className="text-slate-400 font-bold">公休</span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
 
       {/* 3. 優先排課 */}
       <div className="bg-white rounded-3xl border border-slate-200 shadow-2xs overflow-hidden">
@@ -763,7 +554,10 @@ export default function Tab5RulesAndAudit({
             <button 
               onClick={() => {
                 if (isEditingRules) {
-                  setStudioRules(rulesDraft);
+                  if (rulesDraft !== studioRules) {
+                    setStudioRules(rulesDraft);
+                    onRuleUpdate(`館內排課與使用規範已更新\n${rulesDraft || '（已清空）'}`);
+                  }
                   showToast('館內規範已儲存更新');
                 }
                 setIsEditingRules(!isEditingRules);
@@ -863,7 +657,11 @@ export default function Tab5RulesAndAudit({
                   const aVal = slotDraft.all;
                   const lVal = aVal ? '' : slotDraft.large;
                   const sVal = aVal || lVal ? '' : slotDraft.small;
-                  addLog?.(`優先時段設定修改\n${slotModal}：${aVal ? `不限教室 ${teachers[aVal]?.name || '無'}` : `大教室 ${teachers[lVal]?.name || '無'}、小教室 ${teachers[sVal]?.name || '無'}`}`, '設定', 'gray', '', currentUserId, undefined, undefined, 'Daisy');
+                  const cur = priorityGrid[slotModal] || {};
+                  const changed = (cur.all || '') !== aVal || (cur.large || '') !== lVal || (cur.small || '') !== sVal;
+                  if (changed) {
+                    onRuleUpdate(`優先時段設定修改\n${slotModal}：${aVal ? `不限教室 ${teachers[aVal]?.name || '無'}` : `大教室 ${teachers[lVal]?.name || '無'}、小教室 ${teachers[sVal]?.name || '無'}`}`);
+                  }
                   setPriorityGrid((prev: any) => ({ 
                     ...prev, 
                     [slotModal]: { all: aVal || undefined, large: lVal || undefined, small: sVal || undefined } 
@@ -880,63 +678,6 @@ export default function Tab5RulesAndAudit({
         </div>
       )}
 
-      {isMonthEndOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={closeMe}>
-          <div className="bg-white rounded-2xl w-full max-w-sm max-h-[85vh] flex flex-col shadow-xl" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-              <span className="text-sm font-black text-slate-800">月底未結清稽核與關帳</span>
-              <button onClick={closeMe} className="text-slate-400"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-              {meGroups.length === 0 ? (
-                <div className="text-center text-xs text-slate-400 py-8 font-bold">目前無未結清課堂</div>
-              ) : meGroups.map(g => (
-                <div key={g.tId} className="border border-slate-200 rounded-xl">
-                  <button className="w-full flex items-center justify-between px-3 py-2 text-xs font-black text-slate-700" onClick={() => setMeExpanded(p => ({ ...p, [g.tId]: !p[g.tId] }))}>
-                    <span>{g.name}：{g.items.length} 堂未結清</span>
-                    {meExpanded[g.tId] ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                  </button>
-                  {meExpanded[g.tId] && (
-                    <ul className="px-3 pb-2 space-y-1 text-[11px] text-slate-600">
-                      {g.items.map((b: any) => (
-                        <li key={b.id} className="flex justify-between border-t border-slate-100 pt-1">
-                          <span>{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
-                          <span className="font-bold">{b.studentName}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </div>
-            {meGroups.length > 0 && (
-              <div className="px-4 py-3 border-t border-slate-100 space-y-3">
-                <button onClick={onSendReminders} className="w-full bg-amber-500 hover:bg-amber-600 active:scale-95 text-white text-xs font-black py-2.5 rounded-xl transition">
-                  📢 發送催辦通知給老師
-                </button>
-                <div className="border border-red-200 bg-red-50 rounded-xl p-2.5 space-y-1.5">
-                  <div className="text-[10px] text-red-600 font-bold">危險操作：最後期限強制關帳</div>
-                  <button onClick={() => setMeConfirmOpen(true)} className="w-full bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-black py-2 rounded-lg transition">
-                    🔒 強制關帳（未結清全數計罰）
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-      {isMonthEndOpen && meConfirmOpen && (
-        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-6">
-          <div className="bg-white rounded-2xl w-full max-w-xs p-4 space-y-3 shadow-xl">
-            <div className="text-sm font-black text-red-600">二次確認</div>
-            <p className="text-xs text-slate-700 leading-relaxed">確定要將這 {meTotal} 堂未處理課堂全數判定為未到課並計罰老師嗎？執行後課堂將鎖定，如需撤銷須透過「結算更正」審核。</p>
-            <div className="flex gap-2">
-              <button onClick={() => setMeConfirmOpen(false)} className="flex-1 bg-slate-100 text-slate-700 text-xs font-black py-2 rounded-lg">取消</button>
-              <button onClick={() => { setMeConfirmOpen(false); onForceClose?.(); }} className="flex-1 bg-red-600 text-white text-xs font-black py-2 rounded-lg">確定關帳</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

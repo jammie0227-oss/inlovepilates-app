@@ -73,29 +73,25 @@ export interface BookingItem {
   studentId: string;
   roomType: 'large' | 'small';
   lessonType: '1v1' | '1v2';
-  status: 'confirmed' | 'cancelled_normal' | 'special_pending' | 'special_approved' | 'special_rejected';
+  /** special_pending = 非優先審核中（他人優先時段、14 天前預約）：卡住時段、佔學員額度、可簽到不可變更 */
+  status: 'confirmed' | 'cancelled_normal' | 'special_pending';
   signed: boolean;
   signatureData?: string;
   signedAt?: string;
   teacherNote?: string;
   isSystemSigned?: boolean;
   systemSignedAt?: string;
-  isSettlementLocked?: boolean;
-  settlementType?: 'system_deducted' | 'unattended_no_credit_deducted';
+  settlementType?: 'system_deducted';
   overdueReason?: string;
-  /** 改期計罰次數（審核裁決計罰時 +1，撤銷時 -1） */
-  penaltyCount?: number;
   isLateSigned?: boolean;
   isAuto?: boolean;
   type?: string;
-  /** special_pending 的來源：after_hours = 非營業時間預約待審、non_priority = 他人優先時段申請待審（兩者皆卡位、佔額度）；late_change = 24H 內異動/取消待審（不卡位、不佔額度） */
-  pendingKind?: 'after_hours' | 'non_priority' | 'late_change';
-  /** 取消原因標記（after_hours_rejected / non_priority_rejected = 送審預約被駁回，不計入正常取消統計） */
+  /** 取消當下時間 YYYY/MM/DD HH:mm */
+  cancelledAt?: string;
+  /** 超時取消（開課前 24 小時內取消）：僅供紀錄與統計 */
+  isLateCancel?: boolean;
+  /** 取消原因標記（non_priority_rejected = 送審預約被駁回，不計入取消統計） */
   cancelReason?: string;
-  /** 【僅執行期衍生，不寫入資料庫】改教室審核中：檢視上課堂佔用新教室 (to)，原教室 (from) 視同釋出 */
-  roomChangePending?: { from: 'large' | 'small'; to: 'large' | 'small' };
-  /** 【僅執行期衍生】改室審核期間原教室的「原時段已釋出」虛線提示（非真實預約：不佔教室、不佔額度、不可操作） */
-  isReleasedGhost?: boolean;
 }
 
 export interface ReviewItem {
@@ -111,22 +107,12 @@ export interface ReviewItem {
   reason: string;
   status: 'pending' | 'approved' | 'rejected';
   phone?: string;
-  reviewType?: 'cancel' | 'reschedule' | 'after_hours' | 'settlement_undo' | 'room_change' | 'non_priority' | 'sign' | 'late_sign';
-  /** 送審時間（YYYY/MM/DD HH:mm，建立審核單時精準記錄） */
-  submittedAt?: string;
-  reqDate?: string;
-  reqHour?: number;
-  reqMin?: number;
-  reqRoom?: 'large' | 'small';
-  reqLessonType?: '1v1' | '1v2';
-  undoReason?: string;
-  resolvedAt?: string;
+  /** 全站唯一的審核類型：他人優先時段（14 天前）預約 */
+  reviewType: 'non_priority';
   resolvedNote?: string;
   /** 系統自動結案（非管理員裁決）：不可撤銷 */
   autoClosed?: boolean;
-  /** 同一堂課的逾時異動經過（時間順序，含本單事件）；併單或後續異動時寫入 */
-  history?: string[];
-  /** 批次審核（自動排課非營業時間）：本審核單涵蓋的所有課堂 ID，核准 / 駁回一次套用 */
+  /** 批次審核（自動排課）：本審核單涵蓋的所有課堂 ID，核准 / 駁回一次套用 */
   batchBookingIds?: string[];
   /** 批次審核前各課堂快照（供撤銷還原） */
   bookingSnapshots?: BookingItem[];
@@ -134,15 +120,6 @@ export interface ReviewItem {
   bookingSnapshot?: BookingItem;
   /** 審核後課堂狀態（供撤銷時偵測後續變動） */
   bookingAfter?: BookingItem;
-  /** 審核時對學員堂數的異動量（撤銷時反向還原） */
-  creditDelta?: number;
-  creditStudentId?: string;
-  /** 審核時連帶結案的其他審核單 ID（撤銷時一併還原為待審） */
-  cascadedReviewIds?: string[];
-  /** 結算更正核准時被作廢的原取消審核單（不佔用免費取消次數） */
-  voided?: boolean;
-  /** 作廢前的審核狀態（撤銷時還原） */
-  voidedFrom?: 'pending' | 'approved' | 'rejected';
 }
 
 export interface AuditLogItem {
@@ -159,7 +136,11 @@ export interface AuditLogItem {
   category: 'red' | 'yellow' | 'normal';
   /** 通知分級：gray 一般紀錄（不計未讀紅點）/ yellow 提醒注意 / red 重要警示；舊資料缺漏時由 category 推斷 */
   severity?: 'gray' | 'yellow' | 'red';
+  /** 舊資料的全員已讀旗標；個別檢視者的已讀記錄在 readBy */
   read: boolean;
+  readBy?: string[];
+  /** 全館廣播（規範更新）：所有老師可見，各自計算未讀 */
+  broadcast?: boolean;
   teacherId?: string;
   reviewId?: string;
   remainingCredits?: number;
@@ -186,8 +167,6 @@ export interface ScheduleEngineResult {
   remainingUnscheduled?: number;
   /** 是否因場租老師 90 天預約上限而停止 */
   hitHorizonLimit?: boolean;
-  /** 本次因非營業時間而以 special_pending（待審）排入的堂數（管理員為 0） */
-  afterHoursCount?: number;
   /** 本次因他人優先時段而以 special_pending（待審）排入的堂數（管理員為 0） */
   nonPriorityCount?: number;
   suggestedRoomSwaps?: {
@@ -207,17 +186,3 @@ export interface PrioritySlot {
 }
 /** key 格式：`${星期}-${小時}`，例如 '二-9' */
 export type PriorityGrid = Record<string, PrioritySlot>;
-
-// 單日營業時間設定
-export interface DayHoursConfig {
-  enabled: boolean;
-  startHour: number;
-  endHour: number;
-}
-
-// 動態營業時間設定（Tab 5 管理員編輯）
-export interface BusinessHoursConfig {
-  weekday: DayHoursConfig;  // 週一至週五
-  saturday: DayHoursConfig;
-  sunday: DayHoursConfig;
-}
