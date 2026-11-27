@@ -71,7 +71,7 @@ export default function StudentDetailView({
   const isFlexible = isFlexibleSchedule(student);
 
   const createRule = () => {
-    const preset = getStudentBookingPreset(student, userRole);
+    const preset = getStudentBookingPreset(student, student.teacherId);
     return { id: genId('r'), freq: '每週' as const, day: '一' as const, time: '10:00', startDate: todayStr, lessonType: preset.lessonType, roomType: preset.roomType };
   };
 
@@ -315,7 +315,7 @@ export default function StudentDetailView({
           </h3>
           {!isArchived && (
             <button 
-              onClick={() => openGlobalBooking({ studentId: student.id })}
+              onClick={() => openGlobalBooking({ studentId: student.id, fromStudentDetail: true })}
               className="w-7 h-7 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl text-rose-600 flex items-center justify-center font-bold transition shadow-2xs active:scale-95"
               title="臨時預約排課"
             >
@@ -542,7 +542,7 @@ export default function StudentDetailView({
             </div>
             
             <div className="flex-1 overflow-y-auto pr-1">
-              <ScheduleRulesEditor value={ruleDraft} onChange={setRuleDraft} today={todayStr} createRule={createRule} />
+              <ScheduleRulesEditor value={ruleDraft} onChange={setRuleDraft} today={todayStr} teacherId={student.teacherId} createRule={createRule} />
             </div>
             
             <div className="pt-2 flex gap-2 shrink-0 border-t border-slate-100">

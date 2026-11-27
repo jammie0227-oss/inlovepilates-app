@@ -39,21 +39,30 @@ const parseDate = (s: string) => {
 // 預設值 / 狀態判斷
 // ------------------------------------------
 
+/** 管理員（Daisy）的老師 ID */
+export const ADMIN_ID = 't-daisy';
+
+/** 以授課老師身分套用排課規則（優先時段送審與通知） */
+export const getScheduleRole = (teacherId: string): UserRole =>
+  teacherId === ADMIN_ID ? 'admin' : 'teacher';
+
 /**
- * 新增預約的預設課程類別與教室。
- * 1v1 → small；1v2 → large；管理員一律優先 large。
+ * 全站唯一的預設教室規則（依授課老師，非操作者）。
+ * 管理員授課一律 large；一般老師 1v1 → small、1v2 → large。
  */
+export const getDefaultRoomForSchedule = (teacherId: string, courseType: LessonType): RoomType =>
+  teacherId === ADMIN_ID || courseType === '1v2' ? 'large' : 'small';
+
+/** 新增預約 / 排課時段的預設課程類別與教室 */
 export const getStudentBookingPreset = (
-  student?: (Partial<Pick<StudentItem, 'defaultLessonType' | 'lessonType'>> & { rules?: any[] }) | null,
-  userRole: UserRole = 'teacher',
+  student: (Partial<Pick<StudentItem, 'defaultLessonType' | 'lessonType'>> & { rules?: any[] }) | null | undefined,
+  teacherId: string,
 ): { lessonType: LessonType; roomType: RoomType } => {
   // 規則含 1v2 優先 1v2
   const has1v2Rule = !!student?.rules?.some((r: any) => r.lessonType === '1v2');
   const lessonType: LessonType =
     has1v2Rule || student?.defaultLessonType === '1v2' || student?.lessonType === '1v2' ? '1v2' : '1v1';
-  const roomType: RoomType =
-    userRole === 'admin' ? 'large' : lessonType === '1v2' ? 'large' : 'small';
-  return { lessonType, roomType };
+  return { lessonType, roomType: getDefaultRoomForSchedule(teacherId, lessonType) };
 };
 
 /** 距離開課的小時數（可為負數：已開課）。 */
@@ -494,6 +503,7 @@ export const checkBookingTimeConstraints = ({
   userRole,
   today,
   priorityGrid = {},
+  priorityRole = userRole,
 }: {
   dateStr: string;
   startHour: number;
@@ -505,6 +515,8 @@ export const checkBookingTimeConstraints = ({
   /** 今天 'YYYY-MM-DD' */
   today: string;
   priorityGrid?: PriorityGrid;
+  /** 判定優先時段是否送審所用的身分；預設同操作者 */
+  priorityRole?: UserRole;
 }): TimeConstraintResult => {
   // 1. 一般老師最多預約未來 90 天
   if (userRole !== 'admin' && diffDays(dateStr, today) > 90) {
@@ -522,7 +534,7 @@ export const checkBookingTimeConstraints = ({
     dateStr, startHour, startMin, durationMins, roomType, teacherId, priorityGrid,
   });
 
-  if (needsPriorityReview({ dateStr, today, userRole, priorityOwnerId })) {
+  if (needsPriorityReview({ dateStr, today, userRole: priorityRole, priorityOwnerId })) {
     return {
       allowed: true,
       requiresReview: true,
@@ -674,6 +686,8 @@ export const validateAndBuildBooking = ({
       userRole,
       today,
       priorityGrid,
+      // 新增預約：優先時段以授課老師身分判定（管理員代排亦同）；改期仍依操作者
+      priorityRole: mode === 'create' ? getScheduleRole(input.teacherId) : userRole,
     });
     if (!tc.allowed) return fail(tc.reason || '不符合預約時間規定', 'time');
     if (tc.requiresReview && mode === 'reschedule') {

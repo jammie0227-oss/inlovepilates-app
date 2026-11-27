@@ -2,7 +2,7 @@
 import React from 'react';
 import { Plus, X } from 'lucide-react';
 import type { StudentRule } from '../types';
-import { BUSINESS_MINUTES, DAY_HOURS } from '../utils/bookingRules';
+import { BUSINESS_MINUTES, DAY_HOURS, getDefaultRoomForSchedule } from '../utils/bookingRules';
 
 export interface ScheduleSettings {
   noRegularRule: boolean;
@@ -14,6 +14,8 @@ interface Props {
   value: ScheduleSettings;
   onChange: (next: ScheduleSettings) => void;
   today: string;
+  /** 授課老師：決定切換課程種類時的預設教室 */
+  teacherId: string;
   /** 新增時段列的預設值 */
   createRule: () => StudentRule;
 }
@@ -22,7 +24,7 @@ const fieldCls = 'w-full border border-slate-200 rounded-lg p-1.5 bg-white font-
 const pad = (n: number) => String(n).padStart(2, '0');
 
 /** 排課模式、固定時段列表與取消順延開關（新增學員與編輯排課規則共用） */
-export default function ScheduleRulesEditor({ value, onChange, today, createRule }: Props) {
+export default function ScheduleRulesEditor({ value, onChange, today, teacherId, createRule }: Props) {
   const { noRegularRule, rules, autoRescheduleOnCancel } = value;
 
   // 切換模式時順延開關回到該模式的預設值：固定時段開、無固定時間關（且不可開啟）
@@ -41,6 +43,8 @@ export default function ScheduleRulesEditor({ value, onChange, today, createRule
       rules: rules.map((r, i) => {
         if (i !== index) return r;
         const next = { ...r, ...patch };
+        // 切換課程種類時套用預設教室；之後仍可手動改選
+        if (patch.lessonType) next.roomType = getDefaultRoomForSchedule(teacherId, patch.lessonType);
         if (next.lessonType === '1v2') next.roomType = 'large'; // 小教室嚴禁 1v2
         return next;
       }),

@@ -173,7 +173,7 @@ export default function Tab1StudioCalendar({
     if (myStudents.length === 0) return systemAlert('您名下目前無有效學員，無法進行預約');
 
     const targetStudent = myStudents[0];
-    const preset = getStudentBookingPreset(targetStudent, userRole);
+    const preset = getStudentBookingPreset(targetStudent, currentUserId);
     openGlobalBooking({ 
       date, 
       hour: String(h), 

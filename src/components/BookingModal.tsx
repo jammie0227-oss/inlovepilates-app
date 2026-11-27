@@ -4,7 +4,10 @@ import type { StudentItem, TeacherProfile } from '../types';
 import {
   BUSINESS_MINUTES,
   DAY_HOURS,
+  getDefaultRoomForSchedule,
+  getScheduleRole,
   getStudentBookingPreset,
+  isArchivedStudent,
   type BookingRequestInput,
   type ValidateBookingResult,
 } from '../utils/bookingRules';
@@ -18,14 +21,17 @@ export interface BookingFormState {
   lessonType: '1v1' | '1v2';
   teacherId: string;
   studentId: string;
+  /** 由單一學員詳情頁開啟：不提供授課老師選單 */
+  fromStudentDetail?: boolean;
 }
 
 interface BookingModalProps {
   /** 開啟時帶入的預設值 */
   initial: BookingFormState;
-  /** 可選擇的學員 */
+  /** 可選擇的學員；canSelectTeacher 時傳入全部學員，由彈窗依授課老師過濾 */
   students: StudentItem[];
-  userRole: 'admin' | 'teacher';
+  /** 管理員可指定授課老師 */
+  canSelectTeacher: boolean;
   teachers: Record<string, TeacherProfile>;
   validate: (input: BookingRequestInput) => ValidateBookingResult;
   /** 回傳 true 代表已寫入（或已送審），彈窗隨即關閉 */
@@ -42,10 +48,30 @@ const Caret = () => (
 
 /** 全站共用「新增預約」彈窗（排班總覽、個人課表、學員詳情頁） */
 export default function BookingModal({
-  initial, students, userRole, teachers, validate, onSubmit, onClose,
+  initial, students, canSelectTeacher, teachers, validate, onSubmit, onClose,
 }: BookingModalProps) {
   const [form, setForm] = useState<BookingFormState>(initial);
-  const student = students.find(s => s.id === form.studentId);
+  const studentsOf = (teacherId: string) =>
+    canSelectTeacher
+      ? students.filter(s => s.teacherId === teacherId && !isArchivedStudent(s))
+      : students;
+  const selectableStudents = studentsOf(form.teacherId);
+  const student = selectableStudents.find(s => s.id === form.studentId);
+
+  // 切換授課老師：學員重設為該老師名下第一位，課程類別與預設教室同步重算
+  const changeTeacher = (teacherId: string) => {
+    const next = studentsOf(teacherId)[0];
+    setForm(prev => {
+      const lessonType = next ? getStudentBookingPreset(next, teacherId).lessonType : prev.lessonType;
+      return {
+        ...prev,
+        teacherId,
+        studentId: next?.id || '',
+        lessonType,
+        roomType: getDefaultRoomForSchedule(teacherId, lessonType),
+      };
+    });
+  };
 
   const input: BookingRequestInput | null = student
     ? {
@@ -79,6 +105,21 @@ export default function BookingModal({
         </div>
 
         <div className="space-y-3.5 text-sm">
+          {/* 授課老師（僅管理員） */}
+          {canSelectTeacher && (
+            <div>
+              <label className="text-xs font-bold text-slate-600 block mb-1">授課老師</label>
+              <div className="relative">
+                <select value={form.teacherId} onChange={e => changeTeacher(e.target.value)} className={selectCls}>
+                  {Object.values(teachers).filter(t => t.isActive).map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+                <Caret />
+              </div>
+            </div>
+          )}
+
           {/* 1. 選擇學員 (帶剩餘堂數與預設課型) */}
           <div>
             <label className="text-xs font-bold text-slate-600 block mb-1">選擇學員</label>
@@ -87,12 +128,12 @@ export default function BookingModal({
                 value={form.studentId}
                 onChange={e => {
                   const id = e.target.value;
-                  const preset = getStudentBookingPreset(students.find(s => s.id === id), userRole);
+                  const preset = getStudentBookingPreset(selectableStudents.find(s => s.id === id), form.teacherId);
                   setForm(prev => ({ ...prev, studentId: id, ...preset }));
                 }}
                 className={selectCls}
               >
-                {students.map(s => (
+                {selectableStudents.map(s => (
                   <option key={s.id} value={s.id}>
                     {s.name} ({s.credits ?? 0}堂) - {s.defaultLessonType || '1v1'}
                   </option>
@@ -159,12 +200,12 @@ export default function BookingModal({
                 <select
                   value={form.lessonType}
                   onChange={e => {
-                    // 教室自動連動：1v2 → 大教室；1v1 → 小教室（管理員一律優先大教室）
+                    // 教室依授課老師與課程類別套用預設
                     const next = e.target.value as '1v1' | '1v2';
                     setForm(prev => ({
                       ...prev,
                       lessonType: next,
-                      roomType: userRole === 'admin' || next === '1v2' ? 'large' : 'small',
+                      roomType: getDefaultRoomForSchedule(prev.teacherId, next),
                     }));
                   }}
                   className={selectCls}
@@ -178,7 +219,7 @@ export default function BookingModal({
           </div>
         </div>
 
-        <BookingCheckCard result={check} userRole={userRole} teachers={teachers} />
+        <BookingCheckCard result={check} userRole={getScheduleRole(form.teacherId)} teachers={teachers} />
         {!student && <p className="text-xs font-bold text-rose-600">目前沒有可預約的學員</p>}
 
         {/* 按鈕組 */}

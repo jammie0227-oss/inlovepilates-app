@@ -10,7 +10,7 @@ import {
   ScheduleEngineResult 
 } from '../mockData';
 
-import { formatStudentSchedule, isArchivedStudent, archiveConfirmMessage, DAY_HOURS, BUSINESS_MINUTES, REVIEW_TAG, calculateStudentStats } from '../utils/bookingRules';
+import { formatStudentSchedule, isArchivedStudent, archiveConfirmMessage, DAY_HOURS, BUSINESS_MINUTES, REVIEW_TAG, calculateStudentStats, getDefaultRoomForSchedule } from '../utils/bookingRules';
 import BookingCheckCard from './BookingCheckCard';
 import ScheduleRulesEditor, { type ScheduleSettings } from './ScheduleRulesEditor';
 import { useNow } from '../utils/useToday';
@@ -67,7 +67,7 @@ export default function Tab3StudentManagement({
   const [trialLessonType, setTrialLessonType] = useState<'1v1' | '1v2'>('1v1');
 
   // 正式學員排課設定：固定每週時段 / 無固定時間、各時段類別與教室、取消順延開關
-  const createRule = () => ({ id: genId('r'), freq: '每週' as const, day: '一' as const, time: '10:00', startDate: todayStr, lessonType: '1v1' as const, roomType: 'small' as const });
+  const createRule = () => ({ id: genId('r'), freq: '每週' as const, day: '一' as const, time: '10:00', startDate: todayStr, lessonType: '1v1' as const, roomType: getDefaultRoomForSchedule(currentUserId, '1v1') });
   const defaultSchedule = (): ScheduleSettings => ({ noRegularRule: false, rules: [createRule()], autoRescheduleOnCancel: true });
   const [schedule, setSchedule] = useState<ScheduleSettings>(defaultSchedule);
 
@@ -540,7 +540,7 @@ export default function Tab3StudentManagement({
                     />
                   </div>
 
-                  <ScheduleRulesEditor value={schedule} onChange={setSchedule} today={todayStr} createRule={createRule} />
+                  <ScheduleRulesEditor value={schedule} onChange={setSchedule} today={todayStr} teacherId={currentUserId} createRule={createRule} />
                 </div>
               )}
             </div>

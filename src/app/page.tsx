@@ -61,13 +61,14 @@ import {
   isArchivedStudent,
   getAdminOverrideSeverity,
   getSelfCancelSeverity,
+  ADMIN_ID,
+  getDefaultRoomForSchedule,
+  getScheduleRole,
 } from '../utils/bookingRules';
 import type { AutoSwapItem, BookingRequestInput } from '../utils/bookingRules';
 import type { SettlementAction } from '../types';
 import { useToday } from '../utils/useToday';
 import { systemAlert, registerSystemAlert, systemConfirm, registerSystemDialog, type SystemAlertPayload, type SystemDialogRequest } from '../utils/systemAlert';
-
-const ADMIN_ID = 't-daisy';
 
 /** 非優先申請的預設事由（不需老師填寫） */
 const NON_PRIORITY_REASON = '非優先時段預約申請';
@@ -225,9 +226,13 @@ export default function Home() {
   const bookableStudents = students.filter(s => s.teacherId === currentUserId && !isArchivedStudent(s));
   // 由學員詳情頁帶入的學員（管理員查看他人學員時不在自己名單內）一併列入
   const presetStudent = students.find(s => s.id === bookingPreset?.studentId && !isArchivedStudent(s));
-  const modalStudents = presetStudent && !bookableStudents.some(s => s.id === presetStudent.id)
-    ? [presetStudent, ...bookableStudents]
-    : bookableStudents;
+  // 管理員非由學員詳情頁開啟時可選授課老師，學員名單交由彈窗依所選老師過濾
+  const canSelectTeacher = userRole === 'admin' && !bookingPreset?.fromStudentDetail;
+  const modalStudents = canSelectTeacher
+    ? students
+    : presetStudent && !bookableStudents.some(s => s.id === presetStudent.id)
+      ? [presetStudent, ...bookableStudents]
+      : bookableStudents;
 
   // 開啟全域預約彈窗的統一入口
   const openGlobalBooking = (preset?: Partial<BookingFormState> & { studentName?: string }) => {
@@ -235,16 +240,18 @@ export default function Home() {
       students.find(s => s.id === preset?.studentId) ??
       bookableStudents.find(s => s.name === preset?.studentName) ??
       bookableStudents[0];
-    const defaults = getStudentBookingPreset(target, userRole);
+    const teacherId = preset?.teacherId || currentUserId;
+    const lessonType = preset?.lessonType || getStudentBookingPreset(target, teacherId).lessonType;
 
     setBookingPreset({
       date: preset?.date || today,
       hour: String(preset?.hour || '10').padStart(2, '0'),
       minute: String(preset?.minute || '00').padStart(2, '0'),
-      roomType: preset?.roomType || defaults.roomType,
-      lessonType: preset?.lessonType || defaults.lessonType,
-      teacherId: preset?.teacherId || currentUserId,
-      studentId: target?.id || ''
+      roomType: preset?.roomType || getDefaultRoomForSchedule(teacherId, lessonType),
+      lessonType,
+      teacherId,
+      studentId: target?.id || '',
+      fromStudentDetail: preset?.fromStudentDetail,
     });
   };
 
@@ -288,8 +295,8 @@ export default function Home() {
   };
 
   // 一般老師在他人優先時段（14 天內）直接生效的預約 / 改期：通知該優先老師（不帶學員資料）
-  const buildPriorityNoticeLogs = (list: BookingItem[]): AuditLogItem[] => {
-    if (userRole === 'admin') return [];
+  const buildPriorityNoticeLogs = (list: BookingItem[], role = userRole): AuditLogItem[] => {
+    if (role === 'admin') return [];
     const byOwner = new Map<string, BookingItem[]>();
     list.filter(b => b.status === 'confirmed').forEach(b => {
       const owner = findOtherPriorityOwner({
@@ -346,7 +353,7 @@ export default function Home() {
   };
 
   // 非優先審核送審：同批多堂合併為一張批次審核單（核准 / 駁回一次套用），並發一則紅色通知
-  const submitPendingBatch = (list: BookingItem[], reason: string) => {
+  const submitPendingBatch = (list: BookingItem[], reason: string, actor?: string) => {
     if (list.length === 0) return;
     const sorted = [...list].sort((a, b) => a.date.localeCompare(b.date) || (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
     const first = sorted[0];
@@ -372,7 +379,7 @@ export default function Home() {
     pushLogs([buildLessonLog(
       sorted,
       `結果：送交${REVIEW_TAG}${isBatch ? '（批次）' : ''}\n事由：${reason}${lessonList(sorted)}`,
-      '預約', 'red', { reviewId: revId }
+      '預約', 'red', { reviewId: revId, actor }
     )]);
   };
 
@@ -449,6 +456,9 @@ export default function Home() {
     const targetStudent = opts.studentOverride ?? students.find(s => matchesStudent(s, input.studentId, input.studentName));
     const needsReview = validation.requiresReview;
     const pName = validation.priorityOwnerId ? cleanName(validation.priorityOwnerId, '其他老師') : '';
+    // 管理員代其他老師新增預約：紀錄操作者為 Daisy，優先時段依授課老師身分處理
+    const actor = userRole === 'admin' && newBk.teacherId !== currentUserId ? 'Daisy' : undefined;
+    const scheduleRole = getScheduleRole(newBk.teacherId);
 
     // 3. 額度調配：加課超額時，僅能替換「confirmed、未簽、isAuto」的最遠預約；否則走透支確認
     let released: BookingItem | null = null;
@@ -495,8 +505,8 @@ export default function Home() {
         ));
       }
       if (!needsReview) {
-        logItems.push(buildLessonLog([newBk], '預約成立', '預約'));
-        logItems.push(...buildPriorityNoticeLogs([newBk]));
+        logItems.push(buildLessonLog([newBk], '預約成立', '預約', 'normal', { actor }));
+        logItems.push(...buildPriorityNoticeLogs([newBk], scheduleRole));
       }
       logItems.push(...buildSwapLogItems(validation.autoSwaps, {
         byTeacherName: currentTeacherName,
@@ -515,7 +525,7 @@ export default function Home() {
       newBk,
     ]);
     setLogs(prev => [...logItems.slice().reverse(), ...prev]);
-    if (needsReview) submitPendingBatch([newBk], NON_PRIORITY_REASON);
+    if (needsReview) submitPendingBatch([newBk], NON_PRIORITY_REASON, actor);
 
     // ---- 寫入完成後才顯示提示 ----
     if (rebateNotice) systemAlert(rebateNotice, '預排課程已回扣');
@@ -524,7 +534,7 @@ export default function Home() {
     } else if (needsReview) {
       showToast(`已送交${REVIEW_TAG}，待管理員核准`);
     } else if (!opts.silentSuccess) {
-      showToast(userRole !== 'admin' && pName ? `預約建立成功！已通知 ${pName} 老師（優先時段）` : '預約建立成功！');
+      showToast(scheduleRole !== 'admin' && pName ? `預約建立成功！已通知 ${pName} 老師（優先時段）` : '預約建立成功！');
     }
     return true;
   };
@@ -1677,7 +1687,7 @@ export default function Home() {
           <BookingModal
             initial={bookingPreset}
             students={modalStudents}
-            userRole={userRole}
+            canSelectTeacher={canSelectTeacher}
             teachers={teachers}
             validate={checkBooking}
             onSubmit={handleSmartBookingSubmit}
