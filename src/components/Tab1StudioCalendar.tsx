@@ -43,7 +43,7 @@ export default function Tab1StudioCalendar({
   onExecuteReschedule?: (
     bookingId: string, newDate: string, newHour: number, newMin: number, newRoom: 'large' | 'small',
     isCancel?: boolean, newLessonType?: '1v1' | '1v2', autoSwaps?: any[]
-  ) => void;
+  ) => string | undefined;
 }) {
   const [localView, setLocalView] = useState<'week' | 'day'>('day');
   const view = viewMode || localView;
@@ -82,8 +82,9 @@ export default function Tab1StudioCalendar({
     setAdminEditingBooking(b);
   };
   const handleAdminEditConfirm = (p: BookingEditConfirmPayload) => {
-    onExecuteReschedule?.(p.bookingId, p.date, p.hour, p.min, p.roomType, p.isCancel, p.lessonType, p.autoSwaps);
-    setAdminEditingBooking(null);
+    const error: string | undefined = onExecuteReschedule?.(p.bookingId, p.date, p.hour, p.min, p.roomType, p.isCancel, p.lessonType, p.autoSwaps);
+    if (!error) setAdminEditingBooking(null);
+    return error;
   };
 
   // 2. 嚴格過濾：無論管理者 Daisy 還是任課老師，一律只抓取「自己名下」的有效學員

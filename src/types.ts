@@ -54,8 +54,11 @@ export interface StudentItem {
   defaultLessonType?: '1v1' | '1v2';
   lessonType?: '1v1' | '1v2';
   isTrial?: boolean;
+  /** 排課模式：true = 無固定時間（不啟用自動排課）；false / 缺漏 = 固定每週時段 */
   noRegularRule?: boolean;
   rules: StudentRule[];
+  /** 取消時自動順延補排 1 堂（固定時段預設開、無固定時間預設關） */
+  autoRescheduleOnCancel: boolean;
   status: 'active' | 'archived';
   purchases?: PurchaseRecord[];
 }
@@ -81,6 +84,9 @@ export interface BookingItem {
   systemSignedAt?: string;
   settlementType?: 'system_deducted';
   overdueReason?: string;
+  /** 逾期結算：系統取消標記與操作時間 YYYY/MM/DD HH:mm */
+  isSystemCancelled?: boolean;
+  systemCancelledAt?: string;
   isLateSigned?: boolean;
   isAuto?: boolean;
   type?: string;
@@ -120,6 +126,23 @@ export interface ReviewItem {
   bookingAfter?: BookingItem;
 }
 
+/** 逾期結算紀錄：掛在結算通知上，供管理員撤銷（Undo） */
+export interface SettlementRecord {
+  action: 'system_sign' | 'system_cancel';
+  bookingId: string;
+  studentId?: string;
+  /** 結算操作時間，與課堂上的 systemSignedAt / systemCancelledAt 相同 */
+  settledAt: string;
+  /** 結算前課堂快照（撤銷時還原） */
+  snapshot: BookingItem;
+  /** 本次結算扣除的堂數（撤銷時回補） */
+  creditsDeducted: number;
+  /** 系統取消觸發的自動順延補排課堂（撤銷時移除） */
+  postponedBookingId?: string;
+  /** 對應的「系統預排」通知（撤銷時一併標記） */
+  postponeLogId?: string;
+}
+
 export interface AuditLogItem {
   id: string;
   time: string;
@@ -142,6 +165,11 @@ export interface AuditLogItem {
   teacherId?: string;
   reviewId?: string;
   remainingCredits?: number;
+  /** 通知標題（單堂課：老師名・學生名（教室色點 M/D HH:mm 類別））；教室色點以 [[large]] / [[small]] 表示 */
+  title?: string;
+  settlement?: SettlementRecord;
+  /** 此通知對應的操作已被撤銷的時間 */
+  revokedAt?: string;
 }
 
 // 衝突檢測回傳結構 (支援角色隱私遮罩與換室建議)

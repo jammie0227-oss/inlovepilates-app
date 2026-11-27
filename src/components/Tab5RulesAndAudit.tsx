@@ -2,7 +2,8 @@
 import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X, Lock } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
-import { formatTimestamp, getLogSeverity, isLogReadBy, isLogVisibleTo, isPendingApproval, setLogReadBy, REVIEW_TAG } from '../utils/bookingRules';
+import { formatTimestamp, getLogSeverity, isLogReadBy, isLogVisibleTo, isPendingApproval, setLogReadBy, noticeToPlainText, REVIEW_TAG, ROOM_NAME } from '../utils/bookingRules';
+import { NoticeText, RoomDot } from './RoomDot';
 
 export default function Tab5RulesAndAudit({ 
   userRole, 
@@ -14,6 +15,7 @@ export default function Tab5RulesAndAudit({
   reviews, 
   onReview, 
   onReset, 
+  onUndoSettlement,
   logs, 
   setLogs, 
   studioRules, 
@@ -115,7 +117,9 @@ export default function Tab5RulesAndAudit({
     logsToExport.forEach((l: any) => { 
       const { teacherClean, studentClean } = getCleanNames(l);
       const rem = l.remainingCredits !== undefined ? l.remainingCredits : '';
-      const detail = l.detail || l.action || '';
+      const detail = noticeToPlainText(
+        [l.title, l.detail || l.action, l.revokedAt ? `已撤銷（${l.revokedAt}）` : ''].filter(Boolean).join('\n')
+      );
       csv += `${l.time},${l.typeStr},${teacherClean},${studentClean},${rem},"${detail.replace(/"/g, '""')}"\n`; 
     });
     
@@ -209,7 +213,7 @@ export default function Tab5RulesAndAudit({
                           <div className="flex items-center gap-1">
                             <span className="text-slate-400 font-sans">原課堂：</span>
                             <span className="font-bold text-slate-700 font-sans">
-                              {isLargeRoom ? '🟣 大教室' : '🟢 小教室'}
+                              <RoomDot room={isLargeRoom ? 'large' : 'small'} /> {ROOM_NAME[isLargeRoom ? 'large' : 'small']}
                             </span>
                             <span className="font-bold ml-1">{item.time}</span>
                             <span className="font-sans font-black text-slate-900 ml-1">{item.studentName || ''}</span>
@@ -226,7 +230,7 @@ export default function Tab5RulesAndAudit({
                                 .sort((a, b) => a.date.localeCompare(b.date) || (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin))
                                 .map(b => (
                                   <div key={b.id} className="font-mono text-[11px]">
-                                    {b.roomType === 'large' ? '🟣' : '🟢'} {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)} ({b.lessonType})
+                                    <RoomDot room={b.roomType} /> {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)} ({b.lessonType})
                                     {b.signed ? ' · 已簽到' : isPendingApproval(b) ? '' : b.status === 'confirmed' ? ' · 已核准' : ' · 已取消'}
                                   </div>
                                 ))}
@@ -380,9 +384,15 @@ export default function Tab5RulesAndAudit({
                       <span className="font-black text-slate-800 bg-slate-200/60 px-1.5 py-0.5 rounded text-[10px] shrink-0">
                         {l.typeStr}
                       </span>
-                      <span className="font-bold text-slate-700 font-sans break-words min-w-0">{teacherClean}</span>
-                      {studentClean && (
+                      {/* 有標題的通知由第二行顯示老師與學員；僅在操作者不是標題中的老師時保留操作者 */}
+                      {(!l.title || !l.title.startsWith(teacherClean)) && (
+                        <span className="font-bold text-slate-700 font-sans break-words min-w-0">{teacherClean}</span>
+                      )}
+                      {studentClean && !l.title && (
                         <span className="font-black text-slate-900 font-sans break-words min-w-0">{studentClean}</span>
+                      )}
+                      {l.revokedAt && (
+                        <span className="text-[10px] font-black text-slate-500 bg-white border border-slate-300 px-1.5 py-0.5 rounded shrink-0">已撤銷</span>
                       )}
                     </div>
 
@@ -418,10 +428,28 @@ export default function Tab5RulesAndAudit({
                     </div>
                   </div>
 
+                  {/* 第二行：通知標題（含教室色點）與撤銷按鈕 */}
+                  {(l.title || (userRole === 'admin' && l.settlement && !l.revokedAt)) && (
+                    <div className="mt-1.5 pl-4 flex items-center justify-between gap-2">
+                      <p className={`text-xs font-black break-words min-w-0 ${l.revokedAt ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
+                        {l.title && <NoticeText text={l.title} />}
+                      </p>
+                      {userRole === 'admin' && l.settlement && !l.revokedAt && (
+                        <button
+                          onClick={e => { e.stopPropagation(); onUndoSettlement(l.id); }}
+                          className="shrink-0 whitespace-nowrap bg-white border border-slate-300 px-2 py-1 rounded-lg text-[11px] font-bold text-slate-600 hover:bg-slate-50 transition shadow-2xs active:scale-95 flex items-center gap-1"
+                          title="Undo 撤銷結算"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> 撤銷
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                   {/* 點擊展開的詳細內容 */}
                   {isExpanded && detailContent && (
                     <div className="mt-2 pt-2 border-t border-slate-200/60 text-[11px] leading-relaxed text-slate-600 pl-4 font-mono whitespace-pre-line animate-in fade-in duration-100">
-                      {detailContent}
+                      <NoticeText text={detailContent} />
                     </div>
                   )}
                 </div>

@@ -131,6 +131,15 @@ export const findNextLesson = (
 /** 已封存學員不可再被排課（下拉選單與自動順延一律排除） */
 export const isArchivedStudent = (s: Pick<StudentItem, 'status'>): boolean => s.status === 'archived';
 
+/** 無固定時間：不啟用自動排課 */
+export const isFlexibleSchedule = (s: Pick<StudentItem, 'noRegularRule' | 'rules'>): boolean =>
+  !!s.noRegularRule || !s.rules?.some(r => r.freq !== '不固定');
+
+/** 課堂取消後是否自動順延補排：開關開啟、有固定時段且未封存（無固定時間一律不順延） */
+export const shouldAutoReschedule = (
+  s: Pick<StudentItem, 'autoRescheduleOnCancel' | 'status' | 'noRegularRule' | 'rules'>,
+): boolean => s.autoRescheduleOnCancel && !isFlexibleSchedule(s) && !isArchivedStudent(s);
+
 /** 學員仍有效的預排堂數（尚未開課、佔額度；與學員詳情頁「預排課程」同一口徑） */
 export const countScheduledLessons = (
   bookings: BookingItem[],
@@ -783,6 +792,48 @@ export const formatRules = (rules?: any[]): string => {
     })
     .join(' / ');
 };
+
+/** 排課摘要：無固定時間，或列出固定時段 */
+export const formatStudentSchedule = (s: Pick<StudentItem, 'noRegularRule' | 'rules'>): string =>
+  isFlexibleSchedule(s) ? '無固定時間' : formatRules(s.rules);
+
+/** 課堂起迄時間，例如 2026/11/27 14:00–14:50 */
+export const formatLessonRange = (
+  b: Pick<BookingItem, 'date' | 'startHour' | 'startMin' | 'durationMins'>,
+): string => {
+  const end = b.startHour * 60 + b.startMin + (b.durationMins || DEFAULT_DURATION_MINS);
+  return `${b.date.replace(/-/g, '/')} ${timeLabel(b.startHour, b.startMin)}–${timeLabel(Math.floor(end / 60) % 24, end % 60)}`;
+};
+
+// ------------------------------------------
+// 通知格式：教室色點與單堂課
+// 教室色點在通知文字中以標記表示，畫面由 NoticeText 換成圓點，匯出時換成教室名稱
+// ------------------------------------------
+
+export const ROOM_DOT_CLASS: Record<RoomType, string> = { large: 'bg-purple-500', small: 'bg-emerald-500' };
+export const ROOM_NAME: Record<RoomType, string> = { large: '大教室', small: '小教室' };
+export const roomToken = (room: RoomType): string => `[[${room}]]`;
+
+type LessonRefSource = Pick<BookingItem, 'date' | 'startHour' | 'startMin' | 'roomType' | 'lessonType'>;
+
+/** （色點 M/D HH:mm 1v1） */
+export const formatLessonRef = (b: LessonRefSource): string => {
+  const [, m, d] = b.date.split('-').map(Number);
+  return `（${roomToken(b.roomType)} ${m}/${d} ${timeLabel(b.startHour, b.startMin)} ${b.lessonType}）`;
+};
+
+/** 單堂課通知標題：老師名・學生名（色點 M/D HH:mm 1v1）；不含學員的通知省略學生名 */
+export const formatLessonTitle = (teacherName: string, studentName: string, b: LessonRefSource): string =>
+  `${[teacherName, studentName].filter(Boolean).join('・')}${formatLessonRef(b)}`;
+
+/** 多堂通知：一堂沿用單堂格式，多堂顯示堂數，明細由內文列出 */
+export const formatLessonsTitle = (teacherName: string, studentName: string, list: LessonRefSource[]): string =>
+  list.length === 1
+    ? formatLessonTitle(teacherName, studentName, list[0])
+    : `${[teacherName, studentName].filter(Boolean).join('・')} 共 ${list.length} 堂`;
+
+export const noticeToPlainText = (text: string): string =>
+  text.replace(/\[\[(large|small)\]\]/g, (_, room: RoomType) => ROOM_NAME[room]);
 
 // ------------------------------------------
 // 老師月統計（Tab 4 老師與管理員共用）

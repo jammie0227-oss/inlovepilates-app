@@ -617,6 +617,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-d-1', freq: '每週', day: '二', time: '10:00', startDate: '2026-10-27', lessonType: '1v1', roomType: 'small' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -631,6 +632,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v2',
     isTrial: false,
     rules: [{ id: 'r-d-2', freq: '隔週', day: '五', time: '18:00', startDate: '2026-10-30', lessonType: '1v2', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -645,6 +647,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-d-3', freq: '每週', day: '三', time: '15:00', startDate: '2026-11-04', lessonType: '1v1', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -659,6 +662,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-3', freq: '每週', day: '一', time: '14:00', startDate: '2026-11-02', lessonType: '1v1', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -675,6 +679,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-1', freq: '每週', day: '六', time: '09:00', startDate: '2026-10-31', lessonType: '1v1', roomType: 'small' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: [
       { id: 'p-1', date: '2026-10-01', credits: 10, price: 22000, teacherName: 'Abby', studentName: '王小美', signedAt: '2026/10/01 14:00' }
@@ -691,6 +696,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v2',
     isTrial: false,
     rules: [{ id: 'r-2', freq: '每週', day: '六', time: '10:00', startDate: '2026-10-31', lessonType: '1v2', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -705,6 +711,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-a-3', freq: '每週', day: '四', time: '15:00', startDate: '2026-10-29', lessonType: '1v1', roomType: 'small' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -721,6 +728,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-5', freq: '每週', day: '日', time: '10:00', startDate: '2026-11-01', lessonType: '1v1', roomType: 'small' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -735,6 +743,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-t-2', freq: '每週', day: '三', time: '11:00', startDate: '2026-10-28', lessonType: '1v1', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -751,6 +760,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-4', freq: '每週', day: '三', time: '14:00', startDate: '2026-11-04', lessonType: '1v1', roomType: 'small' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -765,6 +775,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v2',
     isTrial: false,
     rules: [{ id: 'r-c-2', freq: '每週', day: '二', time: '19:00', startDate: '2026-10-27', lessonType: '1v2', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -781,6 +792,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v1',
     isTrial: false,
     rules: [{ id: 'r-ta-1', freq: '每週', day: '五', time: '10:00', startDate: '2026-11-27', lessonType: '1v1', roomType: 'small' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   },
@@ -795,6 +807,7 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     lessonType: '1v2',
     isTrial: false,
     rules: [{ id: 'r-ta-2', freq: '每週', day: '五', time: '14:00', startDate: '2026-11-27', lessonType: '1v2', roomType: 'large' }],
+    autoRescheduleOnCancel: true,
     status: 'active',
     purchases: []
   }
@@ -1370,8 +1383,9 @@ export const INITIAL_LOGS: AuditLogItem[] = [
     actor: 'Daisy',
     teacherName: 'Cindy',
     studentName: '陳大文',
-    action: "原課堂：11/04(三) 14:00 🟢\n改至：🟣\n結果：改室完成",
-    detail: "原課堂：11/04(三) 14:00 🟢\n改至：🟣\n結果：改室完成",
+    title: 'Cindy・陳大文（[[large]] 11/4 14:00 1v1）',
+    action: "原定課程：（[[small]] 11/4 14:00 1v1）\n結果：改室完成",
+    detail: "原定課程：（[[small]] 11/4 14:00 1v1）\n結果：改室完成",
     typeStr: '改室',
     category: 'normal',
     read: true,
@@ -1383,8 +1397,9 @@ export const INITIAL_LOGS: AuditLogItem[] = [
     actor: 'Daisy',
     teacherName: 'Tanya',
     studentName: '林小婷',
-    action: "原課堂：11/01(日) 10:00 🟢\n改至：11/03(二) 14:00 🟢\n結果：改期完成",
-    detail: "原課堂：11/01(日) 10:00 🟢\n改至：11/03(二) 14:00 🟢\n結果：改期完成",
+    title: 'Tanya・林小婷（[[small]] 11/3 14:00 1v1）',
+    action: "原定課程：（[[small]] 11/1 10:00 1v1）\n結果：改期完成",
+    detail: "原定課程：（[[small]] 11/1 10:00 1v1）\n結果：改期完成",
     typeStr: '改期',
     category: 'yellow',
     read: false,
@@ -1396,8 +1411,9 @@ export const INITIAL_LOGS: AuditLogItem[] = [
     actor: 'Daisy',
     teacherName: 'Daisy',
     studentName: '黃柏翔',
-    action: '10/27(二) 14:00  -1堂  餘 11 堂',
-    detail: '10/27(二) 14:00  -1堂  餘 11 堂',
+    title: 'Daisy・黃柏翔（[[small]] 10/27 14:00 1v1）',
+    action: '[簽到] -1堂  餘 11 堂',
+    detail: '[簽到] -1堂  餘 11 堂',
     typeStr: '簽到',
     category: 'normal',
     read: true,

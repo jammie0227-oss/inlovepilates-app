@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { PenTool, X, RotateCcw, Check } from 'lucide-react';
-import { formatSignedTime, getSignatureWindowStatus, isFutureLesson, REVIEW_TAG } from '../utils/bookingRules';
+import { formatLessonRange, formatSignedTime, getSignatureWindowStatus, isFutureLesson, REVIEW_TAG } from '../utils/bookingRules';
+import { RoomDot } from './RoomDot';
 import { systemAlert } from '../utils/systemAlert';
 
 // ==========================================
@@ -162,7 +163,7 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showLessonStat
       {(b.settlementType === 'system_deducted' || b.isSystemSigned) ? (
         <span 
           className="text-[10px] bg-amber-100 text-amber-900 border border-amber-300 font-black px-2 py-0.5 rounded-full shadow-2xs flex items-center gap-0.5"
-          title={b.overdueReason ? `系統代簽原因：${b.overdueReason}` : '月底未簽到，系統自動代結扣堂'}
+          title={b.overdueReason ? `系統代簽原因：${b.overdueReason}` : '逾期結算：系統代簽扣堂'}
         >
           ⚡ 系統代簽
         </span>
@@ -178,7 +179,12 @@ export function BookingStatusBadge({ booking: b, onZoomSignature, showLessonStat
         </span>
       ) : b.status === 'cancelled_normal' ? (
         /* 4. 取消類（超時取消附帶取消當下時間） */
-        b.cancelReason === 'non_priority_rejected' ? (
+        b.isSystemCancelled ? (
+          <>
+            <span className="text-[10px] bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full font-black shadow-2xs" title="逾期結算：系統取消（不扣堂數）">系統取消</span>
+            {b.systemCancelledAt && <span className="text-[10px] text-slate-400 font-mono">{b.systemCancelledAt}</span>}
+          </>
+        ) : b.cancelReason === 'non_priority_rejected' ? (
           <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非優先駁回</span>
         ) : b.isLateCancel ? (
           <>
@@ -276,7 +282,7 @@ function CanvasPadModalBody({
       <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 animate-in zoom-in-95">
         <div className="flex justify-between items-center border-b pb-2">
           <h3 className="font-black text-slate-800 text-sm flex items-center gap-1.5">
-            <PenTool className="w-4 h-4 text-rose-500" /> 手寫簽名 ({studentDisplayName})
+            <PenTool className="w-4 h-4 text-rose-500" /> 手寫簽名
           </h3>
           <button
             onClick={onClose}
@@ -291,6 +297,18 @@ function CanvasPadModalBody({
             ⚠️ 此堂課已超過原訂結束時間 1 小時以上，是否確定進行逾期補簽？
           </div>
         )}
+
+        {/* 現場核對：學員姓名、課程日期與起迄時間 */}
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl text-center space-y-1">
+          <p className="text-lg font-black text-slate-900 break-words">{studentDisplayName}</p>
+          {targetBk && (
+            <p className="text-sm font-black text-slate-700 font-mono flex items-center justify-center gap-1 flex-wrap">
+              <RoomDot room={targetBk.roomType} />
+              <span>{formatLessonRange(targetBk)}</span>
+              <span className="text-slate-400 text-xs">{targetBk.lessonType}</span>
+            </p>
+          )}
+        </div>
 
         <CanvasPad
           onCancel={onClose}

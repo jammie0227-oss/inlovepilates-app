@@ -1,12 +1,20 @@
 'use client';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, AlertCircle, PenTool, Clock, Edit3 } from 'lucide-react';
 import { formatTimeStr, formatDateWithDay, formatLocalDate, getDayOfWeek, getExactTimestamp } from '../mockData';
 import { BookingStatusBadge, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
+import { RoomDot } from './RoomDot';
 import { isOverdueUnsettled, getSignatureWindowStatus, isSlotReleased, DAY_HOURS, isPendingApproval, REVIEW_TAG, compareByStart } from '../utils/bookingRules';
 import { useCalendarAutoScroll } from '../utils/useCalendarAutoScroll';
 import { useNow } from '../utils/useToday';
+import { systemConfirm } from '../utils/systemAlert';
+
+/** 逾期課堂結算草稿：每堂選擇系統代簽或系統取消 */
+export interface SettlementDraft {
+  action: 'system_sign' | 'system_cancel';
+  reason: string;
+}
 
 export default function Tab2PersonalSchedule({
   today,
@@ -34,12 +42,9 @@ export default function Tab2PersonalSchedule({
   // 目前瀏覽的日期（日 / 週 / 月共用，切換視圖不跳日期）；null = 跟著今天
   const [pickedDate, setPickedDate] = useState<string | null>(null);
 
-  // --- 月底結算逾期狀態 (必須在組件內部) ---
+  // --- 逾期結算狀態 (必須在組件內部) ---
   const [isOverdueExpanded, setIsOverdueExpanded] = useState(false);
-  const [isMonthEndModalOpen, setIsMonthEndModalOpen] = useState(false);
-  const [settlementDrafts, setSettlementDrafts] = useState<
-    Record<string, { report: 'attended_unsigned' | 'unattended_not_cancelled' | 'pending'; reason: string }>
-  >({});
+  const [settlementDrafts, setSettlementDrafts] = useState<Record<string, SettlementDraft>>({});
 
   // 1. 解析今天的日期
   const [sysYear, sysMonth, sysDay] = today.split('-').map(Number);
@@ -154,7 +159,7 @@ export default function Tab2PersonalSchedule({
       if (b.date !== currentStr) return false;
       if (!b.signed && isPendingApproval(b)) return false; // 待審核課堂歸入「即將上課」
       return b.signed || b.status === 'cancelled_normal';
-    }).sort((a: any, b: any) => (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
+    }).sort((a: any, b: any) => compareByStart(b, a)); // 最新在上
   }, [myBookings, currentStr]);
 
   // 如果逾期學員今天剛好有排課，自動展開提醒
@@ -165,20 +170,37 @@ export default function Tab2PersonalSchedule({
     setIsOverdueExpanded(hasTodayClass);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overdueKey, upcomingBookingsForDay]);
-  // 修改草稿預設為 pending
-  const handleOpenMonthEndModal = () => {
-    const initialDrafts: Record<string, { report: 'attended_unsigned' | 'unattended_not_cancelled' | 'pending'; reason: string }> = {};
-    myOverdueBookings.forEach((b: any) => {
-      initialDrafts[b.id] = { report: 'pending', reason: '' };
-    });
-    setSettlementDrafts(initialDrafts);
-    setIsMonthEndModalOpen(true);
-  };
+  // 僅保留仍在逾期清單中的草稿（期間可能已簽名或取消）
+  const selectedDrafts = Object.fromEntries(
+    myOverdueBookings.filter((b: any) => settlementDrafts[b.id]).map((b: any) => [b.id, settlementDrafts[b.id]])
+  ) as Record<string, SettlementDraft>;
+  const selectedCount = Object.keys(selectedDrafts).length;
 
-  // 將結算草稿交由 page.tsx 執行
-  const handleSaveSettlement = () => {
-    if (onProcessSettlement) onProcessSettlement(settlementDrafts);
-    setIsMonthEndModalOpen(false);
+  /** 再點一次已選的選項即取消選擇（暫不處理） */
+  const toggleSettlement = (id: string, action: SettlementDraft['action']) =>
+    setSettlementDrafts(prev => {
+      const next = { ...prev };
+      if (next[id]?.action === action) delete next[id];
+      else next[id] = { action, reason: next[id]?.reason || '' };
+      return next;
+    });
+
+  const selectAllSettlement = (action: SettlementDraft['action']) =>
+    setSettlementDrafts(prev => Object.fromEntries(
+      myOverdueBookings.map((b: any) => [b.id, { action, reason: prev[b.id]?.reason || '' }])
+    ));
+
+  // 確認後交由 page.tsx 執行結算
+  const handleSubmitSettlement = async () => {
+    if (selectedCount === 0) return;
+    const signCount = Object.values(selectedDrafts).filter(d => d.action === 'system_sign').length;
+    const ok = await systemConfirm(
+      `系統代簽 ${signCount} 堂（每堂扣學員 1 堂）\n系統取消 ${selectedCount - signCount} 堂（不扣堂數）\n\n送出後僅管理員可撤銷，確定送出嗎？`,
+      '確認送出結算'
+    );
+    if (!ok) return;
+    onProcessSettlement?.(selectedDrafts);
+    setSettlementDrafts({});
   };
 
   // 週曆：自動捲動到當週第一堂課（管理員看全館、老師看自己；無課則 09:00）
@@ -190,7 +212,7 @@ export default function Tab2PersonalSchedule({
   const openRescheduleModal = (b: any) => setEditingBooking(b);
 
   const handleConfirmReschedule = (p: BookingEditConfirmPayload) => {
-    onExecuteReschedule(
+    const error: string | undefined = onExecuteReschedule(
       p.bookingId,
       p.date,
       p.hour,
@@ -200,7 +222,8 @@ export default function Tab2PersonalSchedule({
       p.lessonType,
       p.autoSwaps
     );
-    setEditingBooking(null);
+    if (!error) setEditingBooking(null);
+    return error;
   };
 
   return (
@@ -257,35 +280,75 @@ export default function Tab2PersonalSchedule({
               <span>⏰ 逾期未處理 ({myOverdueBookings.length})</span>
             </div>
 
-            <div className="flex items-center gap-2">
-              {isLast5Days && (
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); handleOpenMonthEndModal(); }}
-                  className="bg-amber-600 hover:bg-amber-700 active:scale-95 transition text-white px-2.5 py-1 rounded-xl text-[11px] font-black shadow-xs flex items-center gap-1"
-                >
-                  <span>月底結算</span> ➔
-                </button>
-              )}
-              <span className="text-slate-400 font-bold p-1">{isOverdueExpanded ? '▲' : '▼'}</span>
-            </div>
+            <span className="text-slate-400 font-bold p-1">{isOverdueExpanded ? '▲' : '▼'}</span>
           </div>
           {isOverdueExpanded && (
-            <div className="space-y-1.5 pt-2 border-t border-amber-200/50 mt-2 max-h-[28vh] overflow-y-auto">
-              {myOverdueBookings.map((b: any) => (
-                <div key={b.id} className="p-2.5 bg-white rounded-xl border border-amber-200 flex justify-between items-center text-xs shadow-2xs">
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <span onClick={() => onSelectStudent(b.studentName)} className="font-black text-slate-800 hover:underline cursor-pointer">{b.studentName}</span>
-                      <span className="text-slate-500 font-mono font-bold">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
+            <div className="space-y-2 pt-2 border-t border-amber-200/50 mt-2">
+              <div className="flex items-center justify-end gap-3 text-[11px] font-bold">
+                <button type="button" onClick={() => selectAllSettlement('system_sign')} className="text-amber-700 hover:underline">全部代簽</button>
+                <button type="button" onClick={() => selectAllSettlement('system_cancel')} className="text-rose-600 hover:underline">全部取消</button>
+                <button type="button" onClick={() => setSettlementDrafts({})} disabled={selectedCount === 0} className="text-slate-500 hover:underline disabled:text-slate-300 disabled:no-underline">清除選擇</button>
+              </div>
+
+              <div className="space-y-1.5 max-h-[34vh] overflow-y-auto">
+                {myOverdueBookings.map((b: any) => {
+                  const draft = selectedDrafts[b.id];
+                  return (
+                    <div key={b.id} className="p-2.5 bg-white rounded-xl border border-amber-200 space-y-2 text-xs shadow-2xs">
+                      <div className="flex justify-between items-center gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                          <RoomDot room={b.roomType} />
+                          <span onClick={() => onSelectStudent(b.studentName)} className="font-black text-slate-800 hover:underline cursor-pointer">{b.studentName}</span>
+                          <span className="text-slate-500 font-mono font-bold">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
+                        </div>
+                        <div className="flex gap-1.5 shrink-0 whitespace-nowrap">
+                          <button onClick={() => openRescheduleModal(b)} className="text-[11px] bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg font-bold transition">變更</button>
+                          <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="text-[11px] bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded-lg font-bold transition shadow-xs">{getSignatureWindowStatus(b, now) === 'late_over_1h' ? '補簽' : '簽名'}</button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([
+                          ['system_sign', '系統代簽', '扣 1 堂', 'bg-amber-100 border-amber-400 text-amber-950'],
+                          ['system_cancel', '系統取消', '不扣堂', 'bg-rose-100 border-rose-400 text-rose-950'],
+                        ] as const).map(([action, label, hint, activeCls]) => (
+                          <button
+                            key={action}
+                            type="button"
+                            aria-pressed={draft?.action === action}
+                            onClick={() => toggleSettlement(b.id, action)}
+                            className={`py-1.5 rounded-lg border text-[11px] font-black transition ${
+                              draft?.action === action ? activeCls : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
+                            }`}
+                          >
+                            {label} <span className="font-normal opacity-75">（{hint}）</span>
+                          </button>
+                        ))}
+                      </div>
+                      {draft && (
+                        <input
+                          type="text"
+                          value={draft.reason}
+                          onChange={e => {
+                            const reason = e.target.value;
+                            setSettlementDrafts(prev => ({ ...prev, [b.id]: { ...prev[b.id], reason } }));
+                          }}
+                          placeholder="事由備註（非必填）..."
+                          className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-700 outline-none focus:ring-1 focus:ring-amber-400"
+                        />
+                      )}
                     </div>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <button onClick={() => openRescheduleModal(b)} className="text-[11px] bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg font-bold transition">變更</button>
-                    <button onClick={() => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' })} className="text-[11px] bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded-lg font-bold transition shadow-xs">{getSignatureWindowStatus(b, now) === 'late_over_1h' ? '補簽' : '簽名'}</button>
-                  </div>
-                </div>
-              ))}
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSubmitSettlement}
+                disabled={selectedCount === 0}
+                className="w-full py-2 rounded-xl text-xs font-black transition bg-slate-900 hover:bg-slate-800 text-white disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed"
+              >
+                送出結算（已選 {selectedCount} 堂）
+              </button>
             </div>
           )}
         </div>
@@ -538,140 +601,6 @@ export default function Tab2PersonalSchedule({
         zoomedSignature={zoomedImage}
         onClose={() => setZoomedImage(null)}
       />
-
-      {/* 月底結算逾期處理 Modal */}
-      {isMonthEndModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95 max-h-[90vh] flex flex-col">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-2.5 shrink-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-base">⏰</span>
-                <h3 className="text-sm font-black text-slate-800">月底結算逾期處理</h3>
-              </div>
-              <button 
-                type="button" 
-                onClick={() => setIsMonthEndModalOpen(false)} 
-                className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-3.5 pr-1">
-              {myOverdueBookings.map((b: any) => {
-                const draft = settlementDrafts[b.id] || { report: 'pending' as const, reason: '' };
-
-                return (
-                  <div key={b.id} className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5 shadow-2xs">
-                    <div className="flex justify-between items-center font-mono">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`w-2 h-2 rounded-full ${b.roomType === 'large' ? 'bg-purple-500' : 'bg-emerald-500'}`} />
-                        <span className="font-bold text-slate-800 text-xs">
-                          {formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}
-                        </span>
-                        <span className="font-sans font-black text-slate-900 ml-1 text-xs">
-                          {b.studentName}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-slate-400 font-sans font-bold">
-                        {b.roomType === 'large' ? '🟣 大教室' : '🟢 小教室'} ({b.lessonType})
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setSettlementDrafts(prev => ({
-                          ...prev,
-                          [b.id]: { ...prev[b.id], report: 'attended_unsigned' }
-                        }))}
-                        className={`py-2 px-2.5 rounded-xl border text-left transition flex flex-col ${
-                          draft.report === 'attended_unsigned'
-                            ? 'bg-amber-100 border-amber-300 text-amber-950 font-black shadow-2xs'
-                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                      >
-                        <span className="text-xs font-bold">1. 未簽到</span>
-                        <span className="text-[10px] opacity-75 font-normal">學生有來忘記簽</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setSettlementDrafts(prev => ({
-                          ...prev,
-                          [b.id]: { ...prev[b.id], report: 'unattended_not_cancelled' }
-                        }))}
-                        className={`py-2 px-2.5 rounded-xl border text-left transition flex flex-col ${
-                          draft.report === 'unattended_not_cancelled'
-                            ? 'bg-rose-100 border-rose-300 text-rose-950 font-black shadow-2xs'
-                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                      >
-                        <span className="text-xs font-bold">2. 未取消</span>
-                        <span className="text-[10px] opacity-75 font-normal">學生沒來忘記取消</span>
-                      </button>
-                    </div>
-
-                    {draft.report === 'pending' ? (
-                      <p className="text-[10px] text-slate-400 font-bold">尚未選擇：儲存結算時將暫不處理此堂</p>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setSettlementDrafts(prev => ({
-                          ...prev,
-                          [b.id]: { ...prev[b.id], report: 'pending' }
-                        }))}
-                        className="text-[11px] font-bold text-slate-500 hover:text-slate-800 underline underline-offset-2"
-                      >
-                        取消選擇／暫不處理
-                      </button>
-                    )}
-
-                    <div>
-                      <input
-                        type="text"
-                        value={draft.reason || ''}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setSettlementDrafts(prev => ({
-                            ...prev,
-                            [b.id]: { ...prev[b.id], reason: val }
-                          }));
-                        }}
-                        placeholder="填寫原因備註（非必填，例如：學員趕高鐵先行離開）..."
-                        className="w-full bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-[11px] text-slate-700 outline-none focus:ring-1 focus:ring-amber-400 font-sans shadow-2xs"
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="bg-amber-50/80 p-3 rounded-2xl border border-amber-200 text-amber-900 text-[11px] leading-relaxed shrink-0 space-y-1">
-              <p className="font-bold">※ 月底結算規則說明：</p>
-              <p>• 選擇「未簽到」：系統自動扣除學生堂數，認列授課鐘點費。</p>
-              <p>• 選擇「未取消」：不扣學生堂數，直接取消（超時取消）並自動順延補排。</p>
-            </div>
-
-            <div className="pt-1 flex gap-2 border-t border-slate-100 shrink-0">
-              <button
-                type="button"
-                onClick={() => setIsMonthEndModalOpen(false)}
-                className="flex-1 bg-slate-100 hover:bg-slate-200 transition py-2.5 rounded-xl font-bold text-slate-600 text-xs"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveSettlement}
-                className="flex-1 bg-slate-900 hover:bg-slate-800 transition text-white py-2.5 rounded-xl font-bold text-xs shadow-xs"
-              >
-                確認儲存結算
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

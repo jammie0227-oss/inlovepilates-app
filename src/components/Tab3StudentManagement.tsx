@@ -10,7 +10,9 @@ import {
   ScheduleEngineResult 
 } from '../mockData';
 
-import { formatRules, isOverdueUnsettled, isArchivedStudent, countScheduledLessons, archiveConfirmMessage, matchesStudent, DAY_HOURS, REVIEW_TAG, findNextLesson } from '../utils/bookingRules';
+import { formatStudentSchedule, isOverdueUnsettled, isArchivedStudent, countScheduledLessons, archiveConfirmMessage, matchesStudent, DAY_HOURS, BUSINESS_MINUTES, REVIEW_TAG, findNextLesson } from '../utils/bookingRules';
+import BookingCheckCard from './BookingCheckCard';
+import ScheduleRulesEditor, { type ScheduleSettings } from './ScheduleRulesEditor';
 import { useNow } from '../utils/useToday';
 import { systemAlert, systemConfirm } from '../utils/systemAlert';
 
@@ -41,7 +43,7 @@ function ArchiveToggle({ archived, name, onToggle }: { archived: boolean; name: 
 // ==========================================
 export default function Tab3StudentManagement({ 
   today,currentUserId, students, setStudents, onSelectStudent, isCreateModalOpen, setIsCreateModalOpen, onAddBookings, addLog, onSmartBook, showToast, teachers, bookings, onSign,
-  userRole, priorityGrid, getPriorityHint, onUpdateStudent
+  userRole, priorityGrid, checkBooking, onUpdateStudent
 }: any) {
   const now = useNow();
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -64,17 +66,17 @@ export default function Tab3StudentManagement({
   const [trialRoom, setTrialRoom] = useState<'large' | 'small'>('small');
   const [trialLessonType, setTrialLessonType] = useState<'1v1' | '1v2'>('1v1');
 
-  // 正式學員多時段排課規則 (各時段獨立指定 1v1/1v2 類別與教室)
-  const [newRules, setNewRules] = useState<any[]>([
-    { id: genId('r'), freq: '每週', day: '一', time: '10:00', startDate: todayStr, lessonType: '1v1', roomType: 'small' }
-  ]);
+  // 正式學員排課設定：固定每週時段 / 無固定時間、各時段類別與教室、取消順延開關
+  const createRule = () => ({ id: genId('r'), freq: '每週' as const, day: '一' as const, time: '10:00', startDate: todayStr, lessonType: '1v1' as const, roomType: 'small' as const });
+  const defaultSchedule = (): ScheduleSettings => ({ noRegularRule: false, rules: [createRule()], autoRescheduleOnCancel: true });
+  const [schedule, setSchedule] = useState<ScheduleSettings>(defaultSchedule);
 
   // 新增完成後排課明細與一鍵複製 Modal
   const [scheduleModalResult, setScheduleModalResult] = useState<ScheduleEngineResult | null>(null);
   const [isCopied, setIsCopied] = useState(false);
 
   const hours = DAY_HOURS;
-  const minutes = ['00', '10', '20', '30', '40', '50'];
+  const minutes = BUSINESS_MINUTES;
 
   const myStudents = useMemo(() => students.filter((s: any) => s.teacherId === currentUserId), [students, currentUserId]);
 
@@ -103,9 +105,9 @@ export default function Tab3StudentManagement({
 
   const archivedStudents = useMemo(() => myStudents.filter(isArchivedStudent), [myStudents]);
 
-  // 體驗課時段：他人優先時段即時提示
-  const trialPriorityHint: string | null = isCreateModalOpen && createMode === 'trial'
-    ? getPriorityHint?.({
+  // 體驗課時段：衝堂 / 教室調度 / 優先時段即時顯示於彈窗內
+  const trialCheck = isCreateModalOpen && createMode === 'trial'
+    ? checkBooking?.({
         date: trialDate,
         startHour: parseInt(trialHour, 10),
         startMin: parseInt(trialMin, 10),
@@ -115,7 +117,7 @@ export default function Tab3StudentManagement({
         studentName: newStudentName,
         roomType: trialRoom,
         lessonType: trialLessonType,
-      }) ?? null
+      }, { id: '', name: newStudentName, credits: 1 }) ?? null
     : null;
 
   // 列表開關：封存需確認，解除封存一鍵還原
@@ -134,23 +136,6 @@ export default function Tab3StudentManagement({
   const handleSort = (field: 'name' | 'next') => {
     if (sortField === field) setSortDesc(!sortDesc);
     else { setSortField(field); setSortDesc(false); }
-  };
-
-  const handleUpdateNewRule = (index: number, key: string, val: string) => {
-    const updated = [...newRules];
-    updated[index] = { ...updated[index], [key]: val };
-    if (key === 'lessonType' && val === '1v2') {
-      updated[index].roomType = 'large';
-    }
-    setNewRules(updated);
-  };
-
-  const handleUpdateNewTime = (index: number, type: 'h' | 'm', val: string) => {
-    const updated = [...newRules];
-    const [h, m] = (updated[index].time || '10:00').split(':');
-    if (type === 'h') updated[index].time = `${val}:${m}`;
-    if (type === 'm') updated[index].time = `${h}:${val}`;
-    setNewRules(updated);
   };
 
   // 儲存新增學員（加入防重複送出鎖與隨機熵）
@@ -210,6 +195,7 @@ export default function Tab3StudentManagement({
         isTrial: true,
         noRegularRule: true,
         rules: [],
+        autoRescheduleOnCancel: false,
         status: 'active' as const,
         purchases: trialPurchases
       };
@@ -222,7 +208,8 @@ export default function Tab3StudentManagement({
       showToast(`已建立體驗學員 [${newStudentName}] 並同步排定課堂！`);
       closeModal();
     } else {
-      const isNoRegular = newRules.every(r => r.freq === '不固定');
+      const isNoRegular = schedule.noRegularRule;
+      const newRules = isNoRegular ? [] : schedule.rules;
       const initialCreditsNum = Number(newInitialCredits) || 0;
       const initialPurchases = initialCreditsNum > 0 ? [{
         id: genId('p-init'),
@@ -246,6 +233,7 @@ export default function Tab3StudentManagement({
         isTrial: false,
         noRegularRule: isNoRegular,
         rules: newRules,
+        autoRescheduleOnCancel: schedule.autoRescheduleOnCancel,
         status: 'active' as const,
         purchases: initialPurchases
       };
@@ -297,6 +285,7 @@ export default function Tab3StudentManagement({
     setNewStudentName('');
     setNewStudentPhone('');
     setNewStudentNote('');
+    setSchedule(defaultSchedule());
     setIsSubmitting(false);
     setIsCreateModalOpen(false);
   };
@@ -360,7 +349,7 @@ export default function Tab3StudentManagement({
                   <td className="py-3.5 px-3 font-sans font-bold text-slate-800">
                     <div className="flex flex-col gap-0.5">
                       <span>{s.next ? `${formatDateWithDay(s.next.date)} ${formatTimeStr(s.next.startHour, s.next.startMin)}` : '未排定'}</span>
-                      <span className="text-[10px] text-slate-400 font-mono">{formatRules(s.rules)}</span>
+                      <span className="text-[10px] text-slate-400 font-mono">{formatStudentSchedule(s)}</span>
                     </div>
                   </td>
                   <td className={`py-3.5 px-3 text-right font-black ${s.credits <= 5 ? 'text-rose-600 bg-rose-50/60' : 'text-slate-800'}`}>
@@ -538,11 +527,7 @@ export default function Tab3StudentManagement({
                     </div>
                   </div>
 
-                  {trialPriorityHint && (
-                    <div className="rounded-xl border-2 border-rose-400 bg-rose-50 p-2.5 font-black text-rose-700 leading-relaxed">
-                      {trialPriorityHint}
-                    </div>
-                  )}
+                  <BookingCheckCard result={trialCheck} userRole={userRole} teachers={teachers} />
                 </div>
               )}
 
@@ -559,118 +544,7 @@ export default function Tab3StudentManagement({
                     />
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="font-bold text-slate-700 block">排課時段規則列表</label>
-                    {newRules.map((r, index) => {
-                      const [hStr, mStr] = (r.time || '10:00').split(':');
-                      return (
-                        <div key={index} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2 relative shadow-2xs">
-                          {newRules.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() => setNewRules(newRules.filter((_, i) => i !== index))}
-                              className="absolute top-2 right-2 p-1 bg-white border border-slate-200 rounded text-slate-400 hover:text-rose-500 transition"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          )}
-                          
-                          {/* 第一行：頻率、種類、教室 */}
-                          <div className="grid grid-cols-3 gap-1.5 [&>div]:min-w-0">
-                            <div>
-                              <label className="font-bold text-slate-600 text-[10px]">頻率</label>
-                              <select
-                                value={r.freq}
-                                onChange={e => handleUpdateNewRule(index, 'freq', e.target.value)}
-                                className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                              >
-                                <option value="每週">每週</option>
-                                <option value="隔週">隔週</option>
-                                <option value="不固定">不固定 (不自動排)</option>
-                              </select>
-                            </div>
-                            <div>
-                              <label className="font-bold text-slate-600 text-[10px]">課程種類</label>
-                              <select
-                                value={r.lessonType || '1v1'}
-                                onChange={e => handleUpdateNewRule(index, 'lessonType', e.target.value)}
-                                className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                              >
-                                <option value="1v1">1v1 單人</option>
-                                <option value="1v2">1v2 雙人</option>
-                              </select>
-                            </div>
-                            <div>
-                              <label className="font-bold text-slate-600 text-[10px]">指定教室</label>
-                              <select
-                                value={r.roomType || 'small'}
-                                onChange={e => handleUpdateNewRule(index, 'roomType', e.target.value)}
-                                className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                              >
-                                <option value="small" disabled={r.lessonType === '1v2'}>🟢 小</option>
-                                <option value="large">🟣 大</option>
-                              </select>
-                            </div>
-                          </div>
-
-                          {/* 第二行：星期、時、分、起始日 */}
-                          {r.freq !== '不固定' && (
-                            <>
-                              <div className="grid grid-cols-3 gap-2 [&>div]:min-w-0">
-                                <div>
-                                  <label className="font-bold text-slate-600 text-[10px]">星期</label>
-                                  <select
-                                    value={r.day}
-                                    onChange={e => handleUpdateNewRule(index, 'day', e.target.value)}
-                                    className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                                  >
-                                    {['一', '二', '三', '四', '五', '六', '日'].map(d => <option key={d} value={d}>週{d}</option>)}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="font-bold text-slate-600 text-[10px]">時</label>
-                                  <select
-                                    value={hStr}
-                                    onChange={e => handleUpdateNewTime(index, 'h', e.target.value)}
-                                    className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
-                                  >
-                                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="font-bold text-slate-600 text-[10px]">分</label>
-                                  <select
-                                    value={mStr}
-                                    onChange={e => handleUpdateNewTime(index, 'm', e.target.value)}
-                                    className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
-                                  >
-                                    {minutes.map(m => <option key={m} value={m}>{m}</option>)}
-                                  </select>
-                                </div>
-                              </div>
-                              <div>
-                                <label className="font-bold text-slate-600 text-[10px]">起始排課日</label>
-                                <input
-                                  type="date"
-                                  value={r.startDate || todayStr}
-                                  onChange={e => handleUpdateNewRule(index, 'startDate', e.target.value)}
-                                  className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
-                                />
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-
-                    <button
-                      type="button"
-                      onClick={() => setNewRules([...newRules, { id: genId('r'), freq: '每週', day: '一', time: '10:00', startDate: todayStr, lessonType: '1v1', roomType: 'small' }])}
-                      className="w-full border border-dashed border-slate-300 text-slate-500 font-bold py-2 rounded-xl hover:bg-slate-50 transition flex items-center justify-center gap-1"
-                    >
-                      <Plus className="w-3.5 h-3.5" /> 新增時段
-                    </button>
-                  </div>
+                  <ScheduleRulesEditor value={schedule} onChange={setSchedule} today={todayStr} createRule={createRule} />
                 </div>
               )}
             </div>
@@ -685,10 +559,10 @@ export default function Tab3StudentManagement({
               </button>
               <button
                 type="button"
-                disabled={isSubmitting}
+                disabled={isSubmitting || trialCheck?.ok === false}
                 onClick={handleSaveNewStudent}
                 className={`flex-1 transition text-white py-2.5 rounded-xl font-bold shadow-xs ${
-                  isSubmitting ? 'bg-slate-400 cursor-not-allowed' : 'bg-rose-500 hover:bg-rose-600'
+                  isSubmitting || trialCheck?.ok === false ? 'bg-slate-400 cursor-not-allowed' : 'bg-rose-500 hover:bg-rose-600'
                 }`}
               >
                 {isSubmitting ? '建立中...' : '建立學員'}

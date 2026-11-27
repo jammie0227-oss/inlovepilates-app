@@ -1,7 +1,7 @@
 'use client';
 import { genId } from '../utils/id';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Calendar as CalendarIcon, Users, FileText, BookOpen, User as UserIcon, Plus, ArrowLeft, RotateCcw, Sparkles } from 'lucide-react';
 import { 
   ScheduleEngine,
@@ -27,9 +27,15 @@ import Tab2PersonalSchedule from '../components/Tab2PersonalSchedule';
 import Tab3StudentManagement, { StudentDetailView } from '../components/Tab3StudentManagement';
 import Tab4TeachersManagement, { TeacherDetailView } from '../components/Tab4TeachersManagement';
 import Tab5RulesAndAudit from '../components/Tab5RulesAndAudit';
+import BookingModal, { type BookingFormState } from '../components/BookingModal';
 import {
-  DAY_HOURS,
   REVIEW_TAG,
+  compareByStart,
+  formatLessonRef,
+  formatLessonsTitle,
+  isOverdueUnsettled,
+  occupiesQuota,
+  shouldAutoReschedule,
   canRelocateToSmall,
   findOtherPriorityOwner,
   findReplaceableAutoBooking,
@@ -41,8 +47,6 @@ import {
   isWithin24Hours,
   getSignatureWindowStatus,
   matchesStudent,
-  occupiesQuota,
-  priorityReviewHint,
   validateAndBuildBooking,
   formatRules,
   applyAutoSwaps,
@@ -57,6 +61,7 @@ import {
   getSelfCancelSeverity,
 } from '../utils/bookingRules';
 import type { AutoSwapItem, BookingRequestInput } from '../utils/bookingRules';
+import type { SettlementDraft } from '../components/Tab2PersonalSchedule';
 import { useToday } from '../utils/useToday';
 import { systemAlert, registerSystemAlert, systemConfirm, registerSystemDialog, type SystemAlertPayload, type SystemDialogRequest } from '../utils/systemAlert';
 
@@ -184,23 +189,22 @@ export default function Home() {
     setLogs(prev => [item, ...prev]);
   };
 
-  // 大教室讓位：為每位「被移課的原老師」各建立一筆系統調度通知
+  // 大教室讓位：每一堂被移動的課各發一則改室通知給原老師
   const buildSwapLogItems = (
     swaps: AutoSwapItem[],
     ctx: { byTeacherName: string; newStudentName: string; newLessonType: '1v1' | '1v2' }
-  ): AuditLogItem[] => {
-    const byTeacher = new Map<string, AutoSwapItem[]>();
-    swaps.forEach(sw => byTeacher.set(sw.teacherId, [...(byTeacher.get(sw.teacherId) || []), sw]));
-    return Array.from(byTeacher.entries()).map(([tid, items]) => {
-      const lines = items
-        .map(sw => `${formatDateWithDay(sw.date)} ${formatTimeStr(sw.startHour, sw.startMin)} ${sw.studentName} (1v1)：🟣 大教室 ➔ 🟢 小教室`)
-        .join('\n');
-      return buildLogItem(
-        `系統調度通知：因 ${ctx.byTeacherName} 老師的 ${ctx.newStudentName} (${ctx.newLessonType}) 預約需使用大教室，您的下列課堂已自動移至小教室\n${lines}`,
-        '自動改室', 'yellow', items.map(sw => sw.studentName).join('、'), tid, undefined, undefined, '系統調度'
+  ): AuditLogItem[] =>
+    swaps.map(sw => {
+      const before = { ...sw, roomType: 'large' as const, lessonType: '1v1' as const };
+      const after = { ...before, roomType: 'small' as const };
+      return buildLessonLog(
+        [after],
+        `原定課程：${formatLessonRef(before)}\n系統調度：因 ${ctx.byTeacherName} 老師的 ${ctx.newStudentName} (${ctx.newLessonType}) 預約需使用大教室，此堂已自動移至小教室`,
+        '自動改室', 'yellow', { actor: '系統調度' }
       );
     });
-  };
+
+  const countTeachers = (swaps: AutoSwapItem[]) => new Set(swaps.map(s => s.teacherId)).size;
 
   const navigateToStudent = (identifier: string, sourceTab: number, isId: boolean = false) => {
     const s = isId ? students.find(item => item.id === identifier) : students.find(item => item.name === identifier);
@@ -212,78 +216,73 @@ export default function Home() {
       showToast(`找不到該名學員資料`);
     }
   };
-  // 全域共用預約彈窗狀態
-  const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
-  const [bookingForm, setBookingForm] = useState({
-    date: today,
-    hour: '10',
-    minute: '00',
-    roomType: 'small' as 'large' | 'small',
-    lessonType: '1v1' as '1v1' | '1v2',
-    teacherId: currentUserId,
-    studentName: ''
-  });
+  // 全域共用預約彈窗：非 null 即開啟，內容為帶入的預設值
+  const [bookingPreset, setBookingPreset] = useState<BookingFormState | null>(null);
 
   // 新增預約可選的學員：自己名下且未封存
   const bookableStudents = students.filter(s => s.teacherId === currentUserId && !isArchivedStudent(s));
+  // 由學員詳情頁帶入的學員（管理員查看他人學員時不在自己名單內）一併列入
+  const presetStudent = students.find(s => s.id === bookingPreset?.studentId && !isArchivedStudent(s));
+  const modalStudents = presetStudent && !bookableStudents.some(s => s.id === presetStudent.id)
+    ? [presetStudent, ...bookableStudents]
+    : bookableStudents;
 
   // 開啟全域預約彈窗的統一入口
-  const openGlobalBooking = (preset?: Partial<typeof bookingForm>) => {
-    // 預設學員
-    const defaultStudent = bookableStudents[0]?.name || '';
-    const defaultPreset = getStudentBookingPreset(bookableStudents.find(s => s.name === (preset?.studentName || defaultStudent)), userRole);
+  const openGlobalBooking = (preset?: Partial<BookingFormState> & { studentName?: string }) => {
+    const target =
+      students.find(s => s.id === preset?.studentId) ??
+      bookableStudents.find(s => s.name === preset?.studentName) ??
+      bookableStudents[0];
+    const defaults = getStudentBookingPreset(target, userRole);
 
-    setBookingForm({
+    setBookingPreset({
       date: preset?.date || today,
       hour: String(preset?.hour || '10').padStart(2, '0'),
       minute: String(preset?.minute || '00').padStart(2, '0'),
-      roomType: preset?.roomType || defaultPreset.roomType,
-      lessonType: preset?.lessonType || defaultPreset.lessonType,
+      roomType: preset?.roomType || defaults.roomType,
+      lessonType: preset?.lessonType || defaults.lessonType,
       teacherId: preset?.teacherId || currentUserId,
-      studentName: preset?.studentName || defaultStudent
+      studentId: target?.id || ''
     });
-
-    setIsBookingModalOpen(true);
   };
 
-  // 預約彈窗即時檢測（日期 / 時間 / 教室 / 學員任一變動即重算），用於按鈕上方的紅字 / 琥珀色提示卡
-  const bookingCheck = useMemo(() => {
-    if (!isBookingModalOpen) return null;
-    const stu = students.find(st => st.name === bookingForm.studentName && !isArchivedStudent(st));
-    if (!stu) return null;
-    return validateAndBuildBooking({
-      input: {
-        date: bookingForm.date,
-        startHour: parseInt(bookingForm.hour, 10),
-        startMin: parseInt(bookingForm.minute, 10),
-        durationMins: 50,
-        teacherId: bookingForm.teacherId,
-        studentId: stu.id,
-        studentName: stu.name,
-        roomType: bookingForm.roomType,
-        lessonType: bookingForm.lessonType,
-      },
-      userRole,
-      today,
-      priorityGrid,
-      bookings,
-      teachers,
-      students,
-    });
-  }, [isBookingModalOpen, bookingForm, students, userRole, today, priorityGrid, bookings, teachers]);
+  // 預約彈窗內的即時檢測（衝堂 / 教室調度 / 優先時段），結果直接顯示在彈窗中
+  const checkBooking = useCallback(
+    (input: BookingRequestInput, studentOverride?: Pick<StudentItem, 'id' | 'name' | 'credits'>) =>
+      validateAndBuildBooking({
+        input, userRole, today, priorityGrid, bookings, teachers, students, studentOverride,
+      }),
+    [userRole, today, priorityGrid, bookings, teachers, students]
+  );
 
   const cleanName = (teacherId: string, fallback = '老師') =>
     (teachers[teacherId]?.name || fallback).replace(/ 老師|老師/g, '').trim();
 
-  // 其他預約彈窗（學員快速預約 / 體驗課）的非優先時段即時提示
-  const getPriorityHint = (input: BookingRequestInput): string | null => {
-    const res = validateAndBuildBooking({
-      input, userRole, today, priorityGrid,
-      bookings, teachers, students, skipQuota: true,
-    });
-    return res.ok && res.requiresReview && res.priorityOwnerId
-      ? priorityReviewHint(cleanName(res.priorityOwnerId, '其他老師'))
-      : null;
+  // 單堂（或同一學員多堂）通知：標題一律「老師名・學生名（色點 M/D HH:mm 類別）」
+  const buildLessonLog = (
+    lessons: Pick<BookingItem, 'teacherId' | 'studentName' | 'date' | 'startHour' | 'startMin' | 'roomType' | 'lessonType'>[],
+    detail: string,
+    typeStr: string,
+    category: LogLevel = 'normal',
+    opts: { recipientId?: string; actor?: string; reviewId?: string; remainingCredits?: number } = {}
+  ): AuditLogItem => {
+    const first = lessons[0];
+    const teacherName = cleanName(first.teacherId);
+    return {
+      ...buildLogItem(
+        detail, typeStr, category, first.studentName, opts.recipientId ?? first.teacherId,
+        opts.reviewId, opts.remainingCredits, opts.actor ?? teacherName
+      ),
+      title: formatLessonsTitle(teacherName, first.studentName, lessons),
+    };
+  };
+
+  /** 多堂通知的內文明細；單堂已寫在標題，不重複列出 */
+  const lessonList = (lessons: BookingItem[]) =>
+    lessons.length > 1 ? `\n${lessons.map(formatLessonRef).join('\n')}` : '';
+
+  const pushLogs = (items: AuditLogItem[]) => {
+    if (items.length > 0) setLogs(prev => [...items, ...prev]);
   };
 
   // 一般老師在他人優先時段（14 天內）直接生效的預約 / 改期：通知該優先老師（不帶學員資料）
@@ -299,20 +298,18 @@ export default function Home() {
     });
     return Array.from(byOwner.entries()).map(([ownerId, items]) => {
       const who = cleanName(items[0].teacherId);
-      const lines = items
-        .map(b => `${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)} ${b.roomType === 'large' ? '🟣 大教室' : '🟢 小教室'} (${b.lessonType})`)
-        .join('\n');
-      return buildLogItem(
-        `優先時段提醒：${who} 老師已使用您的優先時段\n${lines}`,
-        '提醒', 'yellow', '', ownerId, undefined, undefined, who
-      );
+      const sorted = [...items].sort(compareByStart);
+      return {
+        ...buildLogItem(
+          `優先時段提醒：${who} 老師已使用您的優先時段${lessonList(sorted)}`,
+          '提醒', 'yellow', '', ownerId, undefined, undefined, who
+        ),
+        title: formatLessonsTitle(who, '', sorted),
+      };
     });
   };
 
-  const notifyPriorityOwners = (list: BookingItem[]) => {
-    const items = buildPriorityNoticeLogs(list);
-    if (items.length > 0) setLogs(prev => [...items, ...prev]);
-  };
+  const notifyPriorityOwners = (list: BookingItem[]) => pushLogs(buildPriorityNoticeLogs(list));
 
   // 學員資料修改：套用並寫入灰階紀錄（內容沒有實際變動則不寫）
   const handleUpdateStudent = (patch: any) => {
@@ -320,15 +317,25 @@ export default function Home() {
     if (!cur) return;
     const labels: Record<string, string> = {
       note: '備註', rules: '排課規則', name: '姓名', phone: '電話', teacherId: '負責老師', status: '狀態',
-      defaultLessonType: '預設課程類別', lessonType: '課程類別', noRegularRule: '固定排課設定',
+      defaultLessonType: '預設課程類別', lessonType: '課程類別', noRegularRule: '排課模式',
+      autoRescheduleOnCancel: '取消時自動順延補排',
     };
+    const comparable = (k: string, v: unknown) => JSON.stringify(k === 'noRegularRule' ? !!v : v ?? null);
     const changes = Object.keys(patch)
-      .filter(k => k !== 'id' && JSON.stringify((cur as any)[k] ?? null) !== JSON.stringify(patch[k] ?? null));
+      .filter(k => k !== 'id' && comparable(k, (cur as any)[k]) !== comparable(k, patch[k]));
     if (changes.length === 0) return;
     setStudents(prev => prev.map(s => s.id === patch.id ? { ...s, ...patch } : s));
     const statusLabel = (v: StudentItem['status']) => (v === 'archived' ? '已封存' : '上課中');
     const lines = changes.map(k => {
       if (k === 'status') return `${labels[k]}：${statusLabel(cur.status)} ➔ ${statusLabel(patch[k])}`;
+      if (k === 'noRegularRule') {
+        const mode = (v: unknown) => (v ? '無固定時間' : '固定每週時段');
+        return `${labels[k]}：${mode(cur.noRegularRule)} ➔ ${mode(patch[k])}`;
+      }
+      if (k === 'autoRescheduleOnCancel') {
+        const onOff = (v: unknown) => (v ? '開啟' : '關閉');
+        return `${labels[k]}：${onOff(cur.autoRescheduleOnCancel)} ➔ ${onOff(patch[k])}`;
+      }
       if (k === 'rules') return `${labels[k]}：${formatRules((cur as any)[k])} ➔ ${formatRules(patch[k])}`;
       if (k === 'note') return `${labels[k]}：${(cur as any)[k] || '（空）'} ➔ ${patch[k] || '（空）'}`;
       return `${labels[k] || k}：${String((cur as any)[k] ?? '（空）')} ➔ ${String(patch[k] ?? '（空）')}`;
@@ -343,10 +350,6 @@ export default function Home() {
     const first = sorted[0];
     const isBatch = sorted.length > 1;
     const revId = reviewIdFor(first.id);
-    const tName = cleanName(first.teacherId);
-    const lines = sorted.map(b =>
-      `${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)} ${b.roomType === 'large' ? '🟣 大教室' : '🟢 小教室'} (${b.lessonType})`
-    ).join('\n');
     const firstTime = `${formatDateWithDay(first.date)} ${formatTimeStr(first.startHour, first.startMin)}`;
     const rev: ReviewItem = {
       id: revId,
@@ -364,13 +367,11 @@ export default function Home() {
       reviewType: 'non_priority',
     };
     setReviews(prev => [rev, ...prev]);
-    setLogs(prev => [
-      buildLogItem(
-        `預約：${isBatch ? `共 ${sorted.length} 堂` : firstTime}\n結果：送交${REVIEW_TAG}${isBatch ? '（批次）' : ''}\n事由：${reason}${isBatch ? `\n${lines}` : ''}`,
-        '預約', 'red', first.studentName, first.teacherId, revId, undefined, tName
-      ),
-      ...prev,
-    ]);
+    pushLogs([buildLessonLog(
+      sorted,
+      `結果：送交${REVIEW_TAG}${isBatch ? '（批次）' : ''}\n事由：${reason}${lessonList(sorted)}`,
+      '預約', 'red', { reviewId: revId }
+    )]);
   };
 
   // 同一學員的整批待審課堂合併為一張審核單
@@ -391,18 +392,25 @@ export default function Home() {
       setBookings(prev => [...prev, ...newBks]);
     }
 
-    // 自動排課：寫入一則灰階紀錄
+    // 自動排課：不論排入幾堂，合併為單一筆「系統預排」通知
     if (newBks.length > 0) {
-      const f = newBks[0];
-      const ordered = [...newBks].sort((a, b) => a.date.localeCompare(b.date) || (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
+      const ordered = [...newBks].sort(compareByStart);
+      const first = ordered[0];
+      const monthDay = (b: BookingItem) => `${Number(b.date.slice(5, 7))}/${Number(b.date.slice(8))}`;
+      const range = `${monthDay(first)} ～ ${monthDay(ordered[ordered.length - 1])}`;
+      const tName = cleanName(first.teacherId);
+      const removedCount = cleanBase ? bookings.length - cleanBase.length : 0;
       const nonPriorityCount = newBks.filter(isPendingApproval).length;
-      addLog(
-        `自動排課（${mode === 'replace_future' ? '重整未來' : mode === 'append_remaining' ? '接續排課' : '新增'}）：共排入 ${newBks.length} 堂\n` +
-        `${formatDateWithDay(ordered[0].date)} ${formatTimeStr(ordered[0].startHour, ordered[0].startMin)} ～ ${formatDateWithDay(ordered[ordered.length - 1].date)} ${formatTimeStr(ordered[ordered.length - 1].startHour, ordered[ordered.length - 1].startMin)}` +
-        (nonPriorityCount > 0 ? `\n其中 ${nonPriorityCount} 堂為非優先時段，已批次送審` : ''),
-        '預約', 'gray', f.studentName, f.teacherId, undefined, undefined,
-        (teachers[f.teacherId]?.name || '老師').replace(/ 老師|老師/g, '').trim()
-      );
+      pushLogs([{
+        ...buildLogItem(
+          `自動排課（${mode === 'replace_future' ? '重整未來' : mode === 'append_remaining' ? '接續排課' : '新增'}）：總共自動排入 ${newBks.length} 堂` +
+          (removedCount > 0 ? `（取代原預排 ${removedCount} 堂）` : '') +
+          `\n起迄日期：${range}\n課堂列表：\n${ordered.map(formatLessonRef).join('\n')}` +
+          (nonPriorityCount > 0 ? `\n其中 ${nonPriorityCount} 堂為非優先時段，已批次送審` : ''),
+          '系統預排', 'normal', first.studentName, first.teacherId, undefined, undefined, tName
+        ),
+        title: `${tName}・${first.studentName} 自動排入 ${newBks.length} 堂（${range}）`,
+      }]);
     }
 
     // 待審課堂（一般老師）：合併送審 + 紅色通知；14 天內使用他人優先時段則通知該老師
@@ -419,8 +427,6 @@ export default function Home() {
       studentOverride?: Pick<StudentItem, 'id' | 'name' | 'credits'>;
       /** 呼叫端會自行顯示成功訊息 */
       silentSuccess?: boolean;
-      /** 呼叫端已在介面內即時顯示過去時段 / 非優先送審提醒，不再跳出二次確認窗 */
-      inlineNotices?: boolean;
     } = {}
   ): Promise<boolean> => {
     const validation = validateAndBuildBooking({
@@ -433,32 +439,17 @@ export default function Home() {
       students,
       studentOverride: opts.studentOverride,
     });
-    if (!validation.ok || !validation.booking) {
-      systemAlert(validation.error || "此時段無法預約", "無法預約");
-      return false;
-    }
+    // 衝堂、教室調度、過去時段與優先時段提示皆由呼叫端彈窗即時顯示，此處僅做寫入前把關
+    if (!validation.ok || !validation.booking) return false;
 
     const newBk = validation.booking;
-    const formattedDate = formatDateWithDay(newBk.date);
-    const timeFormatted = formatTimeStr(newBk.startHour, newBk.startMin);
-    const currentTeacherName = (teachers[newBk.teacherId]?.name || '老師').replace(/ 老師|老師/g, '').trim();
+    const currentTeacherName = cleanName(newBk.teacherId);
     const targetStudent = opts.studentOverride ?? students.find(s => matchesStudent(s, input.studentId, input.studentName));
-
-    // 1. 過去時段提醒（不限制，僅確認）；預約彈窗已在卡片內即時提醒者略過
-    if (!opts.inlineNotices && validation.isPastSlot) {
-      if (!await systemConfirm(`【過去時段提醒】\n此時段（${formattedDate} ${timeFormatted}）已超過開課時間，確認後將直接寫入課表。\n確定要繼續嗎？`)) return false;
-    }
-
-    // 2. 非優先審核（他人優先時段、14 天前預約）
     const needsReview = validation.requiresReview;
     const pName = validation.priorityOwnerId ? cleanName(validation.priorityOwnerId, '其他老師') : '';
-    if (needsReview && !opts.inlineNotices) {
-      if (!await systemConfirm(`【優先時段提醒】\n${priorityReviewHint(pName)}\n\n是否送出申請？`)) return false;
-    }
 
     // 3. 額度調配：加課超額時，僅能替換「confirmed、未簽、isAuto」的最遠預約；否則走透支確認
-    let releasedBookingId: string | null = null;
-    let releasedLogDetail: string | null = null;
+    let released: BookingItem | null = null;
     let rebateNotice: string | null = null;
     if (validation.quota.found && validation.quota.exceeds && targetStudent) {
       const remainingCredits = validation.quota.credits;
@@ -469,15 +460,12 @@ export default function Home() {
           )
         : undefined;
 
-      const lastDateStr = replaceable ? formatDateWithDay(replaceable.date) : '';
-      const lastTimeStr = replaceable ? formatTimeStr(replaceable.startHour, replaceable.startMin) : '';
       const canAutoRebate = !!replaceable &&
         !isWithin24Hours(replaceable.date, replaceable.startHour, replaceable.startMin);
 
       if (replaceable && canAutoRebate) {
         // 最遠預排課距離開課 > 24 小時：自動回扣，寫入完成後提醒
-        releasedBookingId = replaceable.id;
-        releasedLogDetail = `因臨時加課 (${formattedDate} ${timeFormatted})，系統自動回扣最遠日期預排：${lastDateStr} ${lastTimeStr}`;
+        released = replaceable;
         rebateNotice = `已自動回扣最遠日期（${replaceable.date.slice(5).replace('-', '/')}）的預排課程，避免總堂數超出`;
       } else {
         const within24Note = replaceable
@@ -494,33 +482,25 @@ export default function Home() {
       }
     }
 
-    // 4. 教室調整提示（情境 B；讓位成功的提示在寫入完成後才顯示）
-    if (validation.autoSwaps.length === 0 && validation.notices.length > 0) {
-      systemAlert(`【教室調度】\n${validation.notices[0]}`);
-    }
-
     // ---- 先建立所有日誌（任何一筆失敗就整體中止，不會留下半套寫入） ----
     const logItems: AuditLogItem[] = [];
-    const swapNoticeCount = { teachers: 0 };
     try {
-      if (releasedLogDetail && targetStudent) {
-        logItems.push(buildLogItem(releasedLogDetail, '調度', 'yellow', targetStudent.name, newBk.teacherId, undefined, undefined, '系統調配'));
+      if (released) {
+        logItems.push(buildLessonLog(
+          [released],
+          `因臨時加課${formatLessonRef(newBk)}，系統自動回扣最遠日期的這堂預排`,
+          '調度', 'yellow', { recipientId: newBk.teacherId, actor: '系統調配' }
+        ));
       }
       if (!needsReview) {
-        const finalRoomDot = newBk.roomType === 'large' ? '🟣 大教室' : '🟢 小教室';
-        logItems.push(buildLogItem(
-          `${formattedDate} ${timeFormatted} ${finalRoomDot} (${newBk.lessonType})`,
-          '預約', 'normal', newBk.studentName, newBk.teacherId, undefined, undefined, currentTeacherName
-        ));
+        logItems.push(buildLessonLog([newBk], '預約成立', '預約'));
         logItems.push(...buildPriorityNoticeLogs([newBk]));
       }
-      const swapLogs = buildSwapLogItems(validation.autoSwaps, {
+      logItems.push(...buildSwapLogItems(validation.autoSwaps, {
         byTeacherName: currentTeacherName,
         newStudentName: newBk.studentName,
         newLessonType: newBk.lessonType,
-      });
-      swapNoticeCount.teachers = swapLogs.length;
-      logItems.push(...swapLogs);
+      }));
     } catch (err) {
       console.error('調度通知建立失敗', err);
       showToast('調度通知建立失敗，預約已中止，請重試');
@@ -529,7 +509,7 @@ export default function Home() {
 
     // ---- 寫入課堂 / 審核單 / 日誌 ----
     setBookings(prev => [
-      ...applyAutoSwaps(prev.filter(b => b.id !== releasedBookingId), validation.autoSwaps),
+      ...applyAutoSwaps(prev.filter(b => b.id !== released?.id), validation.autoSwaps),
       newBk,
     ]);
     setLogs(prev => [...logItems.slice().reverse(), ...prev]);
@@ -538,8 +518,7 @@ export default function Home() {
     // ---- 寫入完成後才顯示提示 ----
     if (rebateNotice) systemAlert(rebateNotice, '預排課程已回扣');
     if (validation.autoSwaps.length > 0) {
-      systemAlert(`【系統自動調度成功】\n原大教室的 ${validation.autoSwaps.length} 堂 1v1 已移至小教室，並已通知 ${swapNoticeCount.teachers} 位原任課老師。您的 1v2 雙人課已順利排入大教室！`);
-      showToast('調度成功：原 1v1 已移至小教室！');
+      showToast(`調度成功：原大教室 ${validation.autoSwaps.length} 堂 1v1 已移至小教室，並通知 ${countTeachers(validation.autoSwaps)} 位原任課老師`);
     } else if (needsReview) {
       showToast(`已送交${REVIEW_TAG}，待管理員核准`);
     } else if (!opts.silentSuccess) {
@@ -556,8 +535,8 @@ export default function Home() {
     creditDeltas: Record<string, number> = {}
   ): { added?: BookingItem; message?: string } => {
     const stu = students.find(s => matchesStudent(s, cancelled.studentId, cancelled.studentName));
-    if (!stu || stu.status !== 'active') return {};
-    if (!stu.rules?.some(r => r.freq !== '不固定')) return {};
+    // 依學員的「取消時自動順延補排」開關決定；無固定時間沒有時段可依循，不順延
+    if (!stu || !shouldAutoReschedule(stu)) return {};
     const occupied = bookingsAfterCancel.filter(b => matchesStudent(stu, b.studentId, b.studentName) && occupiesQuota(b)).length;
     if (occupied >= stu.credits + (creditDeltas[stu.id] || 0)) return {};
 
@@ -580,6 +559,13 @@ export default function Home() {
     return { added: res.postponedBooking ?? undefined, message: res.alertMsg };
   };
 
+  const buildPostponeLog = (cancelled: BookingItem, added: BookingItem): AuditLogItem =>
+    buildLessonLog(
+      [added],
+      `因${formatLessonRef(cancelled)}取消，故自動延後預排 1 堂${formatLessonRef(added)}`,
+      '系統預排', 'normal', { actor: '系統調配' }
+    );
+
   // 所有「系統自動結案」一律走這裡：更新審核單狀態並寫入紀錄（每張審核單一筆）
   const autoCloseReviews = (items: { review: ReviewItem; status: 'approved' | 'rejected'; note: string }[]) => {
     if (items.length === 0) return;
@@ -588,11 +574,17 @@ export default function Home() {
       const hit = byId.get(r.id);
       return hit ? { ...r, status: hit.status, resolvedNote: hit.note, autoClosed: true } : r;
     }));
-    const logItems = items.map(({ review, note }) => buildLogItem(
-      `原課堂：${review.time}\n結果：${REVIEW_TAG}自動結案（${note}）\n事由：${review.reason}`,
-      '自動結案', 'yellow', review.studentName, review.teacherId, undefined, undefined, cleanName(review.teacherId)
-    ));
-    setLogs(prev => [...logItems, ...prev]);
+    pushLogs(items.map(({ review, note }) => {
+      const ids = review.batchBookingIds?.length ? review.batchBookingIds : [review.bookingId];
+      const lessons = bookings.filter(b => ids.includes(b.id)).sort(compareByStart);
+      const result = `結果：${REVIEW_TAG}自動結案（${note}）\n事由：${review.reason}`;
+      return lessons.length > 0
+        ? buildLessonLog(lessons, `${result}${lessonList(lessons)}`, '自動結案', 'yellow')
+        : buildLogItem(
+            `原課堂：${review.time}\n${result}`,
+            '自動結案', 'yellow', review.studentName, review.teacherId, undefined, undefined, cleanName(review.teacherId)
+          );
+    }));
   };
 
   // 待審課堂跨入開課前 14 天內：自動轉 confirmed、結案審核單，並提醒申請老師與優先時段老師。
@@ -619,17 +611,19 @@ export default function Home() {
       if (!stillPending) closedReviewIds.add(r.id);
     });
 
-    const describe = (b: BookingItem) =>
-      `${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)} ${b.roomType === 'large' ? '🟣 大教室' : '🟢 小教室'} (${b.lessonType})`;
-
     byApplicant.forEach((items, applicantId) => {
       const who = cleanName(applicantId);
-      const sorted = [...items].sort((a, b) => a.date.localeCompare(b.date) || (a.startHour * 60 + a.startMin) - (b.startHour * 60 + b.startMin));
+      const sorted = [...items].sort(compareByStart);
       const names = Array.from(new Set(sorted.map(b => b.studentName))).join('、');
-      logItems.push(buildLogItem(
-        `${REVIEW_TAG}自動核准\n${sorted.map(b => `${describe(b)} ${b.studentName}`).join('\n')}\n結果：${AUTO_APPROVE_NOTE}`,
-        '自動核准', 'yellow', names, applicantId, undefined, undefined, who
-      ));
+      logItems.push({
+        ...buildLogItem(
+          `${REVIEW_TAG}自動核准` +
+          (sorted.length > 1 ? `\n${sorted.map(b => `${formatLessonRef(b)} ${b.studentName}`).join('\n')}` : '') +
+          `\n結果：${AUTO_APPROVE_NOTE}`,
+          '自動核准', 'yellow', names, applicantId, undefined, undefined, who
+        ),
+        title: formatLessonsTitle(who, names, sorted),
+      });
       const byOwner = new Map<string, BookingItem[]>();
       sorted.forEach(b => {
         const owner = findOtherPriorityOwner({
@@ -639,10 +633,13 @@ export default function Home() {
         if (owner) byOwner.set(owner, [...(byOwner.get(owner) || []), b]);
       });
       byOwner.forEach((owned, ownerId) => {
-        logItems.push(buildLogItem(
-          `優先時段提醒：${who} 老師在您優先時段的預約已自動核准\n${owned.map(describe).join('\n')}\n結果：${AUTO_APPROVE_NOTE}`,
-          '自動核准', 'yellow', '', ownerId, undefined, undefined, who
-        ));
+        logItems.push({
+          ...buildLogItem(
+            `優先時段提醒：${who} 老師在您優先時段的預約已自動核准${lessonList(owned)}\n結果：${AUTO_APPROVE_NOTE}`,
+            '自動核准', 'yellow', '', ownerId, undefined, undefined, who
+          ),
+          title: formatLessonsTitle(who, '', owned),
+        });
       });
     });
 
@@ -656,11 +653,11 @@ export default function Home() {
   }, [today, bookings]);
 
   // 非優先審核單：涵蓋的課堂皆已簽到或取消（沒有待審課堂）時自動結案；批次單仍有待審課堂則保留
-  const settlePreBookingReviews = (bookingId: string, bookingsAfter: BookingItem[]) => {
+  const settlePreBookingReviews = (bookingIds: string[], bookingsAfter: BookingItem[]) => {
     autoCloseReviews(reviews.flatMap(review => {
       if (review.status !== 'pending') return [];
       const ids = review.batchBookingIds?.length ? review.batchBookingIds : [review.bookingId];
-      if (!ids.includes(bookingId)) return [];
+      if (!bookingIds.some(id => ids.includes(id))) return [];
       const linked = bookingsAfter.filter(b => ids.includes(b.id));
       if (linked.some(isPendingApproval)) return [];
       const attended = linked.some(b => b.signed);
@@ -684,45 +681,34 @@ export default function Home() {
     isCancel = false,
     newLessonType?: '1v1' | '1v2',
     autoSwaps: AutoSwapItem[] = []
-  ) => {
+  ): string | undefined => {
+    // 回傳錯誤訊息代表未寫入，由變更彈窗直接顯示
     const target = bookings.find(b => b.id === bookingId);
-    if (!target) return;
+    if (!target) return '找不到此課堂，請關閉後重試';
     // 非優先審核中：審核完成前不可改期改室，僅可簽到或取消
     if (!isCancel && isPendingApproval(target)) {
-      showToast('審核完成前無法變更，僅可簽名或取消');
-      return;
+      return '審核完成前無法變更，僅可簽名或取消';
     }
     // 狀態防護：已簽到 / 已取消的課堂不可再異動（取消另允許審核中課堂）
     if (isCancel ? !isSignableBooking(target) : !isActionableBooking(target)) {
-      showToast('此課堂已簽到或已取消，無法再異動');
-      return;
+      return '此課堂已簽到或已取消，無法再異動';
     }
 
-    const oldDateFormatted = formatDateWithDay(target.date);
-    const oldTimeFormatted = formatTimeStr(target.startHour, target.startMin);
-    const oldRoomLabel = target.roomType === 'large' ? '🟣 大教室' : '🟢 小教室';
-
-    const newDateFormatted = formatDateWithDay(newDate);
-    const newTimeFormatted = formatTimeStr(newHour, newMin);
-    const newRoomLabel = newRoom === 'large' ? '🟣 大教室' : '🟢 小教室';
     const finalLessonType = newLessonType || target.lessonType;
 
     const actorName = userRole === 'admin' ? 'Daisy' : cleanName(currentUserId);
 
     // 管理員直接變更「其他老師」的課表：寫入稽核紀錄，並通知操作管理員與被變更的老師
     const isAdminOverride = userRole === 'admin' && target.teacherId !== currentUserId;
-    const ownerName = cleanName(target.teacherId);
-    const logAdminOverride = (detail: string, action: '取消' | '改期' | '改室') => {
+    const logAdminOverride = (lesson: BookingItem, detail: string, action: '取消' | '改期' | '改室') => {
       const level = getAdminOverrideSeverity(action);
-      const adminLog = buildLogItem(
-        `管理員 Daisy 協助 ${ownerName} 老師異動課表\n${detail}`,
-        '管理員異動', level, target.studentName, ADMIN_ID, undefined, undefined, 'Daisy'
-      );
-      const teacherLog = buildLogItem(
-        `管理員 Daisy 已協助變更您的課表\n${detail}`,
-        '管理員異動', level, target.studentName, target.teacherId, undefined, undefined, 'Daisy'
-      );
-      setLogs(prev => [adminLog, teacherLog, ...prev]);
+      const ownerName = cleanName(target.teacherId);
+      pushLogs([
+        buildLessonLog([lesson], `管理員 Daisy 協助 ${ownerName} 老師異動課表\n${detail}`,
+          '管理員異動', level, { recipientId: ADMIN_ID, actor: 'Daisy' }),
+        buildLessonLog([lesson], `管理員 Daisy 已協助變更您的課表\n${detail}`,
+          '管理員異動', level, { actor: 'Daisy' }),
+      ]);
     };
 
     // ================= 取消 =================
@@ -734,14 +720,16 @@ export default function Home() {
       };
       const bookingsAfterCancel = bookings.map(b => b.id === bookingId ? { ...b, ...cancelPatch } : b);
       setBookings(prev => prev.map(b => b.id === bookingId ? { ...b, ...cancelPatch } : b));
-      settlePreBookingReviews(bookingId, bookingsAfterCancel);
+      settlePreBookingReviews([bookingId], bookingsAfterCancel);
 
       const cancelLabel = isLateCancel ? LATE_CANCEL_LABEL : '一般取消';
-      const cancelDetail = `原課堂：${oldDateFormatted} ${oldTimeFormatted} ${oldRoomLabel} (${target.lessonType})\n結果：${cancelLabel}`;
       if (isAdminOverride) {
-        logAdminOverride(`${cancelDetail}（時段已釋出，學員堂數不扣）`, '取消');
+        logAdminOverride(target, `結果：${cancelLabel}（時段已釋出，學員堂數不扣）`, '取消');
       } else {
-        addLog(cancelDetail, '取消', getSelfCancelSeverity(userRole === 'admin', isLateCancel), target.studentName, target.teacherId, undefined, undefined, actorName);
+        pushLogs([buildLessonLog(
+          [target], `結果：${cancelLabel}`, '取消',
+          getSelfCancelSeverity(userRole === 'admin', isLateCancel), { actor: actorName }
+        )]);
       }
 
       // 取消生效後檢查額度，有空位才自動順延補排一堂（起點不早於今天）
@@ -752,10 +740,7 @@ export default function Home() {
         const addedTime = `${formatDateWithDay(added.date)} ${formatTimeStr(added.startHour, added.startMin)}`;
         setBookings(prev => [...prev, added]);
         submitPendingBookings([added], '取消後自動順延');
-        addLog(
-          `因取消 ${oldDateFormatted} ${oldTimeFormatted}，系統自動順延補排：${addedTime}`,
-          '調度', 'normal', target.studentName, target.teacherId, undefined, undefined, '系統調配'
-        );
+        pushLogs([buildPostponeLog(target, added)]);
         notifyPriorityOwners([added]);
         showToast(`${doneText}，並已為學員自動順延補排一堂課（${addedTime}）`);
       } else {
@@ -764,6 +749,7 @@ export default function Home() {
       }
       return;
     }
+
 
     // ================= 改期 / 改室 =================
     const timeUnchanged =
@@ -780,7 +766,7 @@ export default function Home() {
       !isActionableBooking(b) || !canRelocateToSmall(b, bookings, bookingId)
     );
     if (swapInvalid) {
-      return systemAlert('【無法改期】\n原大教室課堂的狀態已變動或小教室已無法容納，系統已中止調度，請重新操作。');
+      return '原大教室課堂的狀態已變動或小教室已無法容納，系統已中止調度，請重新操作。';
     }
     const effectiveBookings = applyAutoSwaps(bookings, autoSwaps);
 
@@ -802,7 +788,7 @@ export default function Home() {
       excludeBookingId: target.id
     });
     if (conflict.hasConflict) {
-      return systemAlert(conflict.reason || "該時段已有預約", "無法預約");
+      return conflict.reason || '該時段已有預約';
     }
 
     // 建立調度通知（寫入前先建好；失敗則整體中止）
@@ -815,8 +801,7 @@ export default function Home() {
       });
     } catch (err) {
       console.error('調度通知建立失敗', err);
-      showToast('調度通知建立失敗，改期已中止，請重試');
-      return;
+      return '調度通知建立失敗，改期已中止，請重試';
     }
 
     const moved: BookingItem = {
@@ -834,93 +819,219 @@ export default function Home() {
     }));
     if (swapLogs.length > 0) setLogs(prev => [...swapLogs.slice().reverse(), ...prev]);
     const afterWriteNotice = swapLogs.length > 0
-      ? `；原大教室 ${autoSwaps.length} 堂 1v1 已移至小教室並通知 ${swapLogs.length} 位原任課老師`
+      ? `；原大教室 ${autoSwaps.length} 堂 1v1 已移至小教室並通知 ${countTeachers(autoSwaps)} 位原任課老師`
       : '';
 
-    const detail = `原課堂：${oldDateFormatted} ${oldTimeFormatted} ${oldRoomLabel} (${target.lessonType})\n改至：${newDateFormatted} ${newTimeFormatted} ${newRoomLabel} (${finalLessonType})\n結果：${changeType}完成`;
+    // 標題只寫變更後的時段與教室，原定課程寫在內文
+    const detail = `原定課程：${formatLessonRef(target)}\n結果：${changeType}完成`;
     if (isAdminOverride) {
-      logAdminOverride(detail, changeType);
+      logAdminOverride(moved, detail, changeType);
     } else {
-      addLog(detail, changeType, userRole === 'admin' ? 'normal' : 'yellow', target.studentName, target.teacherId, undefined, undefined, actorName);
+      pushLogs([buildLessonLog([moved], detail, changeType, userRole === 'admin' ? 'normal' : 'yellow', { actor: actorName })]);
     }
     if (!timeUnchanged || roomChanged) notifyPriorityOwners([moved]);
     showToast(`${userRole === 'admin' ? '管理員已變更預約' : `${changeType}完成！`}${afterWriteNotice}`);
   };
 
-  // --- 老師手動執行：逾期課堂結算處理（系統代簽 / 取消） ---
-  const handleProcessSettlement = (drafts: any) => {
-    const attendedMsg: string[] = [];
+  // --- 老師手動執行：逾期課堂批量結算（系統代簽 / 系統取消） ---
+  const handleProcessSettlement = (drafts: Record<string, SettlementDraft>) => {
     const settleTs = formatTimestamp();
 
-    // 僅處理仍為「有效、未簽」的課堂，避免重複結算
-    const targets = bookings.filter((b: any) =>
-      drafts[b.id] && drafts[b.id].report !== 'pending' && isActionableBooking(b));
+    // 僅處理仍為「逾期未處理」的課堂，避免重複結算
+    const targets = bookings.filter(b => drafts[b.id] && isOverdueUnsettled(b)).sort(compareByStart);
     if (targets.length === 0) {
-      showToast('皆設定為「暫不處理」，無課堂變更。');
+      showToast('沒有可結算的逾期課堂');
       return;
     }
 
     const creditDeltas: Record<string, number> = {};
-    const settledMap: Record<string, Partial<BookingItem>> = {};
-    const cancelledList: BookingItem[] = [];
+    const patches: Record<string, Partial<BookingItem>> = {};
+    const entries = targets.map(b => {
+      const { action, reason: rawReason } = drafts[b.id];
+      const reason = rawReason.trim();
+      const reasonLine = reason ? `\n事由：${reason}` : '';
+      const stu = students.find(st => matchesStudent(st, b.studentId, b.studentName));
+      const isSign = action === 'system_sign';
+      const creditsDeducted = isSign && stu ? 1 : 0;
+      if (stu && creditsDeducted) creditDeltas[stu.id] = (creditDeltas[stu.id] || 0) - creditsDeducted;
+      const remain = stu ? stu.credits + (creditDeltas[stu.id] || 0) : 0;
 
-    targets.forEach(b => {
-      const draft = drafts[b.id];
-      if (draft.report === 'attended_unsigned') {
-        const stu = students.find(st => matchesStudent(st, b.studentId, b.studentName));
-        if (stu) creditDeltas[stu.id] = (creditDeltas[stu.id] || 0) - 1;
-        const remain = stu ? stu.credits + (creditDeltas[stu.id] || 0) : 0;
-        attendedMsg.push(`• ${b.studentName} 系統代簽 扣堂-1 剩餘${remain}`);
-        addLog(
-          `原課堂：${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)}\n結果：系統代簽認列扣 1 堂\n事由：${draft.reason || '老師回報學生有出席'}`,
-          '系統代簽', 'yellow', b.studentName, b.teacherId, undefined, Number(remain)
-        );
-        settledMap[b.id] = {
-          signed: true,
-          signedAt: settleTs,
-          isSystemSigned: true,
-          settlementType: 'system_deducted',
-          systemSignedAt: settleTs,
-          overdueReason: draft.reason || '老師回報學生有出席',
-        };
-      } else {
-        // 學生未到忘記取消：比照一般取消直接生效（不扣堂、釋出時段、順延補排）
-        addLog(
-          `原課堂：${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)}\n結果：${LATE_CANCEL_LABEL}\n事由：${draft.reason || '老師回報未到課'}`,
-          '取消', getSelfCancelSeverity(b.teacherId === ADMIN_ID, true), b.studentName, b.teacherId
-        );
-        settledMap[b.id] = { status: 'cancelled_normal', isLateCancel: true, cancelledAt: settleTs };
-        cancelledList.push(b);
-      }
+      patches[b.id] = isSign
+        ? {
+            status: 'confirmed',
+            signed: true,
+            signedAt: settleTs,
+            isSystemSigned: true,
+            systemSignedAt: settleTs,
+            settlementType: 'system_deducted',
+            overdueReason: reason || undefined,
+          }
+        : {
+            status: 'cancelled_normal',
+            isSystemCancelled: true,
+            systemCancelledAt: settleTs,
+            cancelledAt: settleTs,
+            // 已開課後才取消，統計上屬超時取消
+            isLateCancel: true,
+            overdueReason: reason || undefined,
+          };
+
+      const log = buildLessonLog(
+        [b],
+        (isSign
+          ? `因逾期結算執行【系統代簽】，扣除 ${creditsDeducted} 堂，學員剩餘 ${remain} 堂`
+          : '因逾期結算執行【系統取消】，不扣堂數') + reasonLine,
+        isSign ? '系統代簽' : '系統取消',
+        isSign ? 'yellow' : getSelfCancelSeverity(b.teacherId === ADMIN_ID, true),
+        { remainingCredits: isSign && stu ? remain : undefined }
+      );
+      log.settlement = {
+        action, bookingId: b.id, studentId: stu?.id, settledAt: settleTs,
+        snapshot: { ...b }, creditsDeducted,
+      };
+      return { booking: b, log };
     });
 
-    let next = bookings.map(b => settledMap[b.id] ? { ...b, ...settledMap[b.id] } : b);
+    let next = bookings.map(b => patches[b.id] ? { ...b, ...patches[b.id] } : b);
     const added: BookingItem[] = [];
-    cancelledList.forEach(c => {
-      const result = tryAutoPostpone(c, next, creditDeltas);
+    const postponeLogs: AuditLogItem[] = [];
+    entries.forEach(({ booking, log }) => {
+      if (!log.settlement || log.settlement.action !== 'system_cancel') return;
+      const result = tryAutoPostpone(booking, next, creditDeltas);
       if (!result.added) return;
       added.push(result.added);
       next = [...next, result.added];
-      addLog(
-        `因取消 ${formatDateWithDay(c.date)} ${formatTimeStr(c.startHour, c.startMin)}，系統自動順延補排：${formatDateWithDay(result.added.date)} ${formatTimeStr(result.added.startHour, result.added.startMin)}`,
-        '調度', 'normal', c.studentName, c.teacherId, undefined, undefined, '系統調配'
-      );
+      const postponeLog = buildPostponeLog(booking, result.added);
+      postponeLogs.push(postponeLog);
+      log.settlement = { ...log.settlement, postponedBookingId: result.added.id, postponeLogId: postponeLog.id };
     });
 
     setStudents(prev => prev.map(st =>
       creditDeltas[st.id] ? { ...st, credits: st.credits + creditDeltas[st.id] } : st
     ));
     setBookings(prev => [
-      ...prev.map(b => settledMap[b.id] ? { ...b, ...settledMap[b.id] } : b),
+      ...prev.map(b => patches[b.id] ? { ...b, ...patches[b.id] } : b),
       ...added,
     ]);
+    pushLogs([...postponeLogs, ...entries.map(e => e.log)]);
+    settlePreBookingReviews(targets.map(b => b.id), next);
     submitPendingBookings(added, '取消後自動順延');
     notifyPriorityOwners(added);
 
-    let finalAlert = "【逾期課堂結算處理完成】\n";
-    if (attendedMsg.length > 0) finalAlert += `\n[未簽到處理]\n${attendedMsg.join("\n")}\n`;
-    if (cancelledList.length > 0) finalAlert += `\n[未取消處理]\n${cancelledList.length} 堂已取消（${LATE_CANCEL_LABEL}，不扣學員堂數），自動順延補排 ${added.length} 堂。`;
-    systemAlert(finalAlert);
+    const signedCount = entries.filter(e => e.log.settlement?.action === 'system_sign').length;
+    const cancelledCount = entries.length - signedCount;
+    systemAlert(
+      `【逾期課堂結算處理完成】\n系統代簽 ${signedCount} 堂（扣堂）\n系統取消 ${cancelledCount} 堂（不扣堂），自動順延補排 ${added.length} 堂`
+    );
+  };
+
+  // --- 管理員撤銷逾期結算：還原為逾期未處理、回補堂數、移除自動補排 ---
+  const handleUndoSettlement = (logId: string) => {
+    if (userRole !== 'admin') return;
+    const log = logs.find(l => l.id === logId);
+    const record = log?.settlement;
+    if (!log || !record) return;
+    if (log.revokedAt) {
+      showToast('此結算已撤銷');
+      return;
+    }
+
+    const current = bookings.find(b => b.id === record.bookingId);
+    const stillSettled = !!current && (record.action === 'system_sign'
+      ? current.signed && current.systemSignedAt === record.settledAt
+      : current.status === 'cancelled_normal' && current.systemCancelledAt === record.settledAt);
+    if (!current || !stillSettled) {
+      showToast('此課堂在結算後已有後續變動，無法撤銷');
+      return;
+    }
+    const postponed = bookings.find(b => b.id === record.postponedBookingId);
+    if (postponed && !isSignableBooking(postponed)) {
+      showToast('自動補排的課堂已簽到或取消，無法撤銷');
+      return;
+    }
+
+    // 逾期課堂已在免審核期內，一律還原為 confirmed、未簽到
+    const restored: BookingItem = { ...record.snapshot, status: 'confirmed', teacherNote: current.teacherNote };
+    const remaining = bookings.filter(b => b.id !== postponed?.id);
+    // 系統取消曾釋出時段：若已被其他預約使用則不可還原
+    if (record.action === 'system_cancel' && checkGlobalConflict({
+      dateStr: restored.date, startHour: restored.startHour, startMin: restored.startMin,
+      durationMins: restored.durationMins || 50, roomType: restored.roomType, lessonType: restored.lessonType,
+      teacherId: restored.teacherId, studentId: restored.studentId, studentName: restored.studentName,
+      userRole: 'admin', existingBookings: remaining, teachersMap: teachers,
+      studentsMap: Object.fromEntries(students.map(st => [st.id, st])), excludeBookingId: restored.id,
+    }).hasConflict) {
+      showToast('原時段已被其他預約使用，無法撤銷');
+      return;
+    }
+
+    const next = remaining.map(b => b.id === restored.id ? restored : b);
+    setBookings(prev => prev
+      .filter(b => b.id !== postponed?.id)
+      .map(b => b.id === restored.id ? restored : b));
+    if (record.creditsDeducted > 0) {
+      setStudents(prev => prev.map(st => st.id === record.studentId
+        ? { ...st, credits: st.credits + record.creditsDeducted }
+        : st));
+    }
+    // 補排課堂若曾送審，審核單一併結案
+    if (postponed) settlePreBookingReviews([postponed.id], next);
+    const revokedAt = formatTimestamp();
+    setLogs(prev => prev.map(l =>
+      l.id === logId || (!!record.postponeLogId && l.id === record.postponeLogId) ? { ...l, revokedAt } : l));
+
+    showToast(
+      `已撤銷結算，課堂回到逾期未處理` +
+      (record.creditsDeducted > 0 ? `，回補 ${record.creditsDeducted} 堂` : '') +
+      (postponed ? '，並移除自動補排課堂' : '')
+    );
+  };
+
+  // --- 清空學員所有尚未開課的預排（不順延補排，合併通知） ---
+  const handleClearUpcoming = (studentId: string) => {
+    const stu = students.find(s => s.id === studentId);
+    if (!stu || (userRole !== 'admin' && stu.teacherId !== currentUserId)) return;
+    const now = new Date();
+    const targets = bookings
+      .filter(b => matchesStudent(stu, b.studentId, b.studentName) && occupiesQuota(b) && !isOverdueUnsettled(b, now))
+      .sort(compareByStart);
+    if (targets.length === 0) {
+      showToast('目前沒有尚未開課的預排');
+      return;
+    }
+
+    const cancelledAt = formatTimestamp();
+    const patches = new Map<string, Partial<BookingItem>>(targets.map(b => [b.id, {
+      status: 'cancelled_normal', cancelledAt, isLateCancel: isWithin24Hours(b.date, b.startHour, b.startMin),
+    }]));
+    const apply = (b: BookingItem): BookingItem => {
+      const patch = patches.get(b.id);
+      return patch ? { ...b, ...patch } : b;
+    };
+    setBookings(prev => prev.map(apply));
+    settlePreBookingReviews(targets.map(b => b.id), bookings.map(apply));
+
+    // 每位任課老師一則合併通知（一般情況下僅一位）
+    const byTeacher = new Map<string, BookingItem[]>();
+    targets.forEach(b => byTeacher.set(b.teacherId, [...(byTeacher.get(b.teacherId) || []), b]));
+    pushLogs(Array.from(byTeacher.entries()).map(([teacherId, items]) => {
+      const isOverride = userRole === 'admin' && teacherId !== currentUserId;
+      const lines = items.map(b =>
+        `${formatLessonRef(b)}${patches.get(b.id)?.isLateCancel ? ` ${LATE_CANCEL_LABEL}` : ''}`);
+      const tName = cleanName(teacherId);
+      return {
+        ...buildLogItem(
+          `${isOverride ? '管理員 Daisy 已協助清空預排\n' : ''}清空所有預排：批次取消 ${items.length} 堂（不扣學員堂數、不順延補排）\n${lines.join('\n')}`,
+          '清空預排',
+          isOverride
+            ? getAdminOverrideSeverity('取消')
+            : getSelfCancelSeverity(userRole === 'admin', items.some(b => patches.get(b.id)?.isLateCancel)),
+          stu.name, teacherId, undefined, undefined, userRole === 'admin' ? 'Daisy' : tName
+        ),
+        title: `${tName}・${stu.name} 清空預排 ${items.length} 堂`,
+      };
+    }));
+    showToast(`已清空 ${targets.length} 堂預排`);
   };
 
   // 非優先審核處理（結果日誌統一第三行備註事由）
@@ -934,8 +1045,6 @@ export default function Home() {
 
     const isApproved = decision === 'approved';
     const targetBooking = bookings.find(b => b.id === rev.bookingId);
-    const studentName = targetBooking?.studentName || rev.studentName || '';
-    const cleanTeacher = cleanName(rev.teacherId, rev.teacherName);
     const reasonText = rev.reason ? `\n事由：${rev.reason}` : '';
     const decisionPatch: Partial<BookingItem> = isApproved
       ? { status: 'confirmed' }
@@ -968,13 +1077,11 @@ export default function Home() {
       const targetIds = new Set(targets.map(t => t.id));
       setBookings(prev => prev.map(b => targetIds.has(b.id) ? { ...b, ...decisionPatch } : b));
       setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, status: decision, bookingSnapshots: targets.map(t => ({ ...t })) } : r));
-      const lines = targets
-        .map(b => `${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)}`)
-        .join('、');
-      addLog(
-        `預約：共 ${targets.length} 堂（${lines}）\n結果：${REVIEW_TAG}批次${resultText}${reasonText}`,
-        '預約', isApproved ? 'yellow' : 'red', studentName, rev.teacherId, reviewId, undefined, cleanTeacher
-      );
+      pushLogs([buildLessonLog(
+        [...targets].sort(compareByStart),
+        `結果：${REVIEW_TAG}批次${resultText}${reasonText}${lessonList(targets)}`,
+        '預約', isApproved ? 'yellow' : 'red', { reviewId }
+      )]);
       showToast(`審核完成：${REVIEW_TAG}批次（${targets.length} 堂）已${isApproved ? '核准' : '駁回'}`);
       return;
     }
@@ -1001,10 +1108,10 @@ export default function Home() {
     setReviews(prev => prev.map(r => r.id === reviewId
       ? { ...r, status: decision, bookingSnapshot: { ...targetBooking }, bookingAfter: after }
       : r));
-    addLog(
-      `預約：${rev.time}\n結果：${REVIEW_TAG}${resultText}${reasonText}`,
-      '預約', isApproved ? 'yellow' : 'red', studentName, rev.teacherId, reviewId, undefined, cleanTeacher
-    );
+    pushLogs([buildLessonLog(
+      [after], `結果：${REVIEW_TAG}${resultText}${reasonText}`,
+      '預約', isApproved ? 'yellow' : 'red', { reviewId }
+    )]);
     showToast(`審核完成：${REVIEW_TAG}已${isApproved ? '核准' : '駁回'}`);
   };
 
@@ -1022,6 +1129,10 @@ export default function Home() {
     }
     // 待審案件只存在於開課前 14 天（含）以前；已進入免審核期者撤銷後會立即自動核准，故不開放
     const reviewed = rev.batchBookingIds ? rev.bookingSnapshots || [] : rev.bookingSnapshot ? [rev.bookingSnapshot] : [];
+    if (reviewed.length === 0) {
+      showToast('找不到審核前的課堂紀錄，無法撤銷審核');
+      return;
+    }
     if (reviewed.some(b => isInReviewFreeWindow(b.date, today))) {
       showToast('課堂已進入開課前 14 天內免審核期，無法撤銷審核');
       return;
@@ -1038,10 +1149,11 @@ export default function Home() {
       showToast('原時段已被其他預約使用，無法撤銷審核');
       return;
     }
-    const logReset = () => addLog(
-      `原課堂：${rev.time}\n結果：撤銷審核（回歸待審）`,
-      '預約', 'yellow', rev.studentName || '', rev.teacherId, undefined, undefined, cleanName(rev.teacherId, rev.teacherName)
-    );
+    const logReset = () => pushLogs([buildLessonLog(
+      [...reviewed].sort(compareByStart),
+      `結果：撤銷審核（回歸待審）${lessonList(reviewed)}`,
+      '預約', 'yellow'
+    )]);
 
     // 批次審核：逐堂確認未被後續異動，再整批還原為待審
     if (rev.batchBookingIds && rev.bookingSnapshots?.length) {
@@ -1116,8 +1228,6 @@ export default function Home() {
     if (creditsStudent && creditsStudent.credits <= 0) {
       if (!await systemConfirm('該學員剩餘堂數為 0，簽到後將成為負數（欠堂），確定繼續嗎？')) return;
     }
-    const bDate = formatDateWithDay(targetBooking.date);
-    const bTime = formatTimeStr(targetBooking.startHour, targetBooking.startMin);
     const tName = (teachers[targetBooking.teacherId || currentUserId]?.name || 'Daisy').replace(/ 老師|老師/g, '').trim();
 
     // 2. 計算扣除後的剩餘堂數 (若已透支允許扣至 0 或負數，此處配合既有邏輯取 Math.max(0, ...))
@@ -1151,22 +1261,19 @@ export default function Home() {
           }
         : b;
     setBookings(prev => prev.map(applySignature));
-    if (signedWhilePending) settlePreBookingReviews(bookingId, bookings.map(applySignature));
+    if (signedWhilePending) settlePreBookingReviews([bookingId], bookings.map(applySignature));
 
     // 5. 日誌記錄與彈窗提示分流
     const actionLabel = isLate ? '補簽' : '簽到';
     const logBadgeColor = isLate || signedWhilePending ? 'yellow' : 'normal';
 
-    addLog(
-      `${bDate} ${bTime} [${actionLabel}] -1堂  餘 ${afterC} 堂${signedWhilePending ? '\n審核完成前已到課簽到（此堂免審核）' : ''}`, 
-      actionLabel, 
-      logBadgeColor, 
-      sName, 
-      targetBooking.teacherId || currentUserId,
-      undefined,
-      afterC,
-      tName
-    );
+    pushLogs([buildLessonLog(
+      [targetBooking],
+      `[${actionLabel}] -1堂  餘 ${afterC} 堂${signedWhilePending ? '\n審核完成前已到課簽到（此堂免審核）' : ''}`,
+      actionLabel,
+      logBadgeColor,
+      { actor: tName, remainingCredits: afterC }
+    )]);
 
     showToast(`${actionLabel}完成！[${sName}] 已扣 1 堂，剩餘 ${afterC} 堂`);
   };
@@ -1431,8 +1538,8 @@ export default function Home() {
                   }}
                   onAddBookings={handleAddBookings}
                   onExecuteReschedule={handleExecuteReschedule}
-                  onSmartBook={handleSmartBookingSubmit}
-                  getPriorityHint={getPriorityHint}
+                  openGlobalBooking={openGlobalBooking}
+                  onClearUpcoming={handleClearUpcoming}
                   students={students}
                   priorityGrid={priorityGrid}
                   showToast={showToast}
@@ -1456,7 +1563,7 @@ export default function Home() {
                   onAddBookings={handleAddBookings}
                   addLog={addLog}
                   onSmartBook={handleSmartBookingSubmit}
-                  getPriorityHint={getPriorityHint}
+                  checkBooking={checkBooking}
                   userRole={userRole}
                   priorityGrid={priorityGrid}
                   showToast={showToast}
@@ -1507,6 +1614,7 @@ export default function Home() {
                 reviews={reviews} 
                 onReview={handleReview} 
                 onReset={handleResetReview} 
+                onUndoSettlement={handleUndoSettlement}
                 logs={logs} 
                 setLogs={setLogs} 
                 studioRules={studioRules} 
@@ -1545,214 +1653,18 @@ export default function Home() {
             <span className="text-[10px]">規範審核</span>
           </button>
         </nav>
-        {/* 🌟 統一全域預約彈窗（完美圖一版面） */}
-      {isBookingModalOpen && (
-        <div 
-          className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
-          style={{ zIndex: 99999 }}
-        >
-          <div className="bg-white rounded-3xl w-full max-w-sm max-h-[90vh] overflow-y-auto p-6 shadow-2xl relative space-y-4">
-            
-            {/* 標題與關閉按鈕 */}
-            <div className="flex justify-between items-center pb-1">
-              <h3 className="font-black text-lg text-slate-800 tracking-tight">新增預約</h3>
-              <button 
-                type="button" 
-                onClick={() => setIsBookingModalOpen(false)}
-                className="text-slate-400 hover:text-slate-700 text-xl font-bold p-1 leading-none"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-3.5 text-sm">
-              {/* 1. 選擇學員 (帶剩餘堂數與預設課型) */}
-              <div>
-                <label className="text-xs font-bold text-slate-600 block mb-1">選擇學員</label>
-                <div className="relative">
-                  <select
-                    value={bookingForm.studentName}
-                    onChange={(e) => {
-                      const name = e.target.value;
-                      const s = bookableStudents.find(st => st.name === name);
-                      const preset = getStudentBookingPreset(s, userRole);
-                      setBookingForm(prev => ({
-                        ...prev,
-                        studentName: name,
-                        lessonType: preset.lessonType,
-                        roomType: preset.roomType
-                      }));
-                    }}
-                    className="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 text-slate-800 font-bold appearance-none outline-none focus:border-rose-500"
-                  >
-                    {bookableStudents.map(s => (
-                        <option key={s.id} value={s.name}>
-                          {s.name} ({s.credits ?? 0}堂) - {s.defaultLessonType || '1v1'}
-                        </option>
-                      ))}
-                  </select>
-                  <span className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400 text-xs">▼</span>
-                </div>
-              </div>
-
-              {/* 2. 預約日期 (選到過去日期立即防呆) */}
-              <div>
-                <label className="text-xs font-bold text-slate-600 block mb-1">預約日期</label>
-                <input
-                  type="date"
-                  value={bookingForm.date}
-                  onChange={(e) => setBookingForm(prev => ({ ...prev, date: e.target.value }))}
-                  className="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 text-slate-800 font-bold outline-none focus:border-rose-500"
-                />
-              </div>
-
-              {/* 3. 時 (Hour) 與 分 (10 分鐘為單位) */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-bold text-slate-600 block mb-1">時 (Hour)</label>
-                  <div className="relative">
-                    <select
-                      value={bookingForm.hour}
-                      onChange={(e) => setBookingForm(prev => ({ ...prev, hour: e.target.value }))}
-                      className="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 text-slate-800 font-bold appearance-none outline-none focus:border-rose-500"
-                    >
-                      {DAY_HOURS.map(h => (
-                        <option key={h} value={String(h).padStart(2, '0')}>{String(h).padStart(2, '0')}</option>
-                      ))}
-                    </select>
-                    <span className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400 text-xs">▼</span>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-bold text-slate-600 block mb-1">分 (10 分鐘為單位)</label>
-                  <div className="relative">
-                    <select
-                      value={bookingForm.minute}
-                      onChange={(e) => setBookingForm(prev => ({ ...prev, minute: e.target.value }))}
-                      className="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 text-slate-800 font-bold appearance-none outline-none focus:border-rose-500"
-                    >
-                      {['00', '10', '20', '30', '40', '50'].map(m => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </select>
-                    <span className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400 text-xs">▼</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* 4. 教室選擇 (帶彩色圓點) 與 課程種類 */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-bold text-slate-600 block mb-1">教室選擇</label>
-                  <div className="relative">
-                    <select
-                      value={bookingForm.roomType}
-                      onChange={(e) => setBookingForm(prev => ({ ...prev, roomType: e.target.value as any }))}
-                      className="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 text-slate-800 font-bold appearance-none outline-none focus:border-rose-500"
-                    >
-                      <option value="large">🟣 大教室</option>
-                      <option value="small">🟢 小教室</option>
-                    </select>
-                    <span className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400 text-xs">▼</span>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-bold text-slate-600 block mb-1">課程種類</label>
-                  <div className="relative">
-                    <select
-                      value={bookingForm.lessonType}
-                      onChange={(e) => {
-                        // 教室自動連動：1v2 → 大教室；1v1 → 小教室（管理員一律優先大教室）
-                        const next = e.target.value as '1v1' | '1v2';
-                        setBookingForm(prev => ({
-                          ...prev,
-                          lessonType: next,
-                          roomType: userRole === 'admin' || next === '1v2' ? 'large' : 'small'
-                        }));
-                      }}
-                      className="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 text-slate-800 font-bold appearance-none outline-none focus:border-rose-500"
-                    >
-                      <option value="1v1">1v1 單人</option>
-                      <option value="1v2">1v2 雙人</option>
-                    </select>
-                    <span className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400 text-xs">▼</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* 即時檢測提示卡（日期 / 時間 / 教室 / 學員變動時即時更新，不需送出才看到） */}
-            {bookingCheck && (
-              <div className="space-y-2 text-xs">
-                {!bookingCheck.ok && (
-                  <div className="rounded-2xl border-2 border-rose-400 bg-rose-50 p-3 font-bold text-rose-700 leading-relaxed whitespace-pre-line">
-                    {bookingCheck.errorKind === 'conflict' ? '⛔ ' : '⚠️ '}
-                    {(bookingCheck.error || '此時段無法預約').replace(/^【[^】]+】/, '')}
-                  </div>
-                )}
-                {bookingCheck.ok && bookingCheck.isPastSlot && (
-                  <div className="rounded-2xl border-2 border-rose-400 bg-rose-50 p-3 font-black text-rose-700 leading-relaxed">
-                    ⚠️ 此時段已超過開課時間，確認後將直接寫入課表
-                  </div>
-                )}
-                {bookingCheck.ok && bookingCheck.requiresReview && bookingCheck.priorityOwnerId && (
-                  <div className="rounded-2xl border-2 border-rose-400 bg-rose-50 p-3 font-black text-rose-700 leading-relaxed">
-                    {priorityReviewHint(cleanName(bookingCheck.priorityOwnerId, '其他老師'))}
-                  </div>
-                )}
-                {bookingCheck.ok && !bookingCheck.requiresReview && userRole !== 'admin' && bookingCheck.priorityOwnerId && (
-                  <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3 font-bold text-amber-800 leading-relaxed">
-                    ℹ️ 此為 {cleanName(bookingCheck.priorityOwnerId, '其他老師')} 優先時段（14 天內），預約直接生效並通知該老師
-                  </div>
-                )}
-                {bookingCheck.ok && bookingCheck.notices.length > 0 && (
-                  <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3 font-bold text-amber-800 leading-relaxed">
-                    ℹ️ {bookingCheck.notices[0]}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 按鈕組 */}
-            <div className="grid grid-cols-2 gap-3 pt-3">
-              <button
-                type="button"
-                onClick={() => setIsBookingModalOpen(false)}
-                className="w-full py-3 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold transition active:scale-95"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  if (!bookingForm.studentName) return systemAlert('請選擇學員');
-                  const s = bookableStudents.find(st => st.name === bookingForm.studentName);
-                  if (!s) return systemAlert('找不到該學員資料');
-                  const ok = await handleSmartBookingSubmit({
-                    date: bookingForm.date,
-                    startHour: parseInt(bookingForm.hour, 10),
-                    startMin: parseInt(bookingForm.minute, 10),
-                    durationMins: 50,
-                    teacherId: bookingForm.teacherId,
-                    studentId: s.id,
-                    studentName: s.name,
-                    roomType: bookingForm.roomType,
-                    lessonType: bookingForm.lessonType,
-                  }, { inlineNotices: true });
-                  if (ok) setIsBookingModalOpen(false);
-                }}
-                disabled={!bookingCheck || !bookingCheck.ok}
-                className="w-full py-3 rounded-2xl bg-rose-500 hover:bg-rose-600 text-white font-bold transition active:scale-95 shadow-md shadow-rose-200 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
-              >
-                確認預約
-              </button>
-            </div>
-
-          </div>
-        </div>
-      )}
+        {/* 全域共用新增預約彈窗 */}
+        {bookingPreset && (
+          <BookingModal
+            initial={bookingPreset}
+            students={modalStudents}
+            userRole={userRole}
+            teachers={teachers}
+            validate={checkBooking}
+            onSubmit={handleSmartBookingSubmit}
+            onClose={() => setBookingPreset(null)}
+          />
+        )}
 
       </div>
     </div>

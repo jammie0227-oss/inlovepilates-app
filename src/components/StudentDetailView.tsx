@@ -1,7 +1,7 @@
 'use client';
 import { genId } from '../utils/id';
 import React, { useState, useMemo } from 'react';
-import { Plus, Edit3, Clock, PenTool, ZoomIn, X, AlertCircle, History, CreditCard, Sparkles, FileText, AlertTriangle, Copy, Check, Archive, ArchiveRestore } from 'lucide-react';
+import { Plus, Edit3, Clock, PenTool, ZoomIn, X, AlertCircle, History, CreditCard, Sparkles, FileText, AlertTriangle, Copy, Check, Archive, ArchiveRestore, Trash2 } from 'lucide-react';
 import { 
   formatTimeStr, 
   getExactTimestamp, 
@@ -12,13 +12,14 @@ import {
 
 import { BookingStatusBadge, CanvasPad, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DAY_HOURS, REVIEW_TAG, isOverdueUnsettled, getSignatureWindowStatus, isPendingApproval, occupiesQuota, matchesStudent, getScheduleQuota, isArchivedStudent, archiveConfirmMessage, compareByStart } from '../utils/bookingRules';
+import ScheduleRulesEditor, { type ScheduleSettings } from './ScheduleRulesEditor';
+import { getStudentBookingPreset, formatStudentSchedule, isFlexibleSchedule, isTaughtBooking, REVIEW_TAG, isOverdueUnsettled, getSignatureWindowStatus, isPendingApproval, occupiesQuota, matchesStudent, getScheduleQuota, isArchivedStudent, archiveConfirmMessage, compareByStart } from '../utils/bookingRules';
 import { systemAlert, systemConfirm } from '../utils/systemAlert';
 import { useNow } from '../utils/useToday';
 
 export default function StudentDetailView({ 
-  today,student, onBack, bookings, onUpdateStudent, onPurchase, onSign, onUpdateBookingNote, onAddBookings, onExecuteReschedule, onSmartBook, showToast, addLog, currentUserId, teachers, userRole,
-  students, priorityGrid, getPriorityHint,
+  today,student, onBack, bookings, onUpdateStudent, onPurchase, onSign, onUpdateBookingNote, onAddBookings, onExecuteReschedule, openGlobalBooking, onClearUpcoming, showToast, addLog, currentUserId, teachers, userRole,
+  students, priorityGrid,
   externalBuyModalOpen, setExternalBuyModalOpen
 }: any) {
   const [expandHistory, setExpandHistory] = useState(false);
@@ -28,17 +29,6 @@ export default function StudentDetailView({
   
   // 變更預約狀態 (三行新排版 + 逾期事由備註)
   const [editingBooking, setEditingBooking] = useState<any>(null);
-
-  // 預排課程卡片右上角「+」臨時排課彈窗狀態
-  const [isQuickBookModalOpen, setIsQuickBookModalOpen] = useState(false);
-  const initialPreset = getStudentBookingPreset(student, userRole);
-  const [quickBookForm, setQuickBookForm] = useState({
-    roomType: initialPreset.roomType,
-    date: today,
-    hour: '14',
-    minute: '00',
-    lessonType: initialPreset.lessonType
-  });
 
   // 購課彈窗狀態與單堂換算
   const [localBuyModalOpen, setLocalBuyModalOpen] = useState(false);
@@ -58,8 +48,8 @@ export default function StudentDetailView({
   const [selectedContract, setSelectedContract] = useState<any | null>(null);
 
   // 規則編輯狀態 (每個時段均可自訂種類 1v1 / 1v2 與教室)
-  const [isEditingRuleModal, setIsEditingRuleModal] = useState(false);
-  const [tempRules, setTempRules] = useState<any[]>([]);
+  // 排課規則編輯草稿；非 null 即開啟彈窗
+  const [ruleDraft, setRuleDraft] = useState<ScheduleSettings | null>(null);
   
   // 自動排課確認與一鍵複製彈窗
   const [autoScheduleOpen, setAutoScheduleOpen] = useState(false);
@@ -74,7 +64,8 @@ export default function StudentDetailView({
   // 逾期未處理（已開課、未簽、未取消）與預排互斥，口徑同 Tab 2 / Tab 4
   const overdueBookings = studentBookings.filter((b: any) => isOverdueUnsettled(b, now));
   const upcomingAndScheduled = studentBookings.filter((b: any) => occupiesQuota(b) && !isOverdueUnsettled(b, now)).sort(compareByStart);
-  const historyLessons = studentBookings.filter((b: any) => b.status === 'confirmed' && (b.signed || isOverdueUnsettled(b, now)))
+  // 歷史紀錄只列已簽到（含補簽 / 系統代簽）與已取消；逾期未處理僅出現在上方逾期區塊
+  const historyLessons = studentBookings.filter((b: any) => isTaughtBooking(b) || b.status === 'cancelled_normal')
     .sort((a: any, b: any) => compareByStart(b, a)); // 最新在前，收合時顯示最近 5 堂
   const purchases = [...(student.purchases || [])].sort((a: any, b: any) => b.date.localeCompare(a.date));
 
@@ -87,81 +78,35 @@ export default function StudentDetailView({
   // 自動排課額度明細（歷史簽到已於簽到當下扣堂，不重複扣除）
   const quota = getScheduleQuota(bookings, student, now);
 
-  const hours = DAY_HOURS;
-  const minutes = BUSINESS_MINUTES;
   const todayStr = today;
+  const isFlexible = isFlexibleSchedule(student);
+
+  const createRule = () => {
+    const preset = getStudentBookingPreset(student, userRole);
+    return { id: genId('r'), freq: '每週' as const, day: '一' as const, time: '10:00', startDate: todayStr, lessonType: preset.lessonType, roomType: preset.roomType };
+  };
 
   const handleOpenRuleModal = () => {
-    const preset = getStudentBookingPreset(student, userRole);
-    setTempRules(
-      student.rules?.length > 0 
-        ? [...student.rules] 
-        : [{ id: genId('r'), freq: '每週', day: '一', time: '10:00', startDate: todayStr, lessonType: preset.lessonType, roomType: preset.roomType }]
-    );
-    setIsEditingRuleModal(true);
-  };
-
-  const handleUpdateTempRule = (index: number, key: string, val: string) => {
-    const newRules = [...tempRules];
-    newRules[index] = { ...newRules[index], [key]: val };
-    if (key === 'lessonType' && val === '1v2') {
-      newRules[index].roomType = 'large';
-    }
-    setTempRules(newRules);
-  };
-
-  const handleUpdateTempTime = (index: number, type: 'h' | 'm', val: string) => {
-    const newRules = [...tempRules];
-    const [h, m] = (newRules[index].time || '10:00').split(':');
-    if (type === 'h') newRules[index].time = `${val}:${m}`;
-    if (type === 'm') newRules[index].time = `${h}:${val}`;
-    setTempRules(newRules);
+    setRuleDraft({
+      noRegularRule: isFlexible,
+      rules: isFlexible ? [] : student.rules.map((r: any) => ({ ...r })),
+      autoRescheduleOnCancel: !isFlexible && student.autoRescheduleOnCancel,
+    });
   };
 
   const handleSaveRules = () => {
-    onUpdateStudent({ 
+    if (!ruleDraft) return;
+    const rules = ruleDraft.noRegularRule ? [] : ruleDraft.rules;
+    onUpdateStudent({
       id: student.id,
-      rules: tempRules,
-      defaultLessonType: tempRules[0]?.lessonType || student.defaultLessonType || '1v1',
-      noRegularRule: tempRules.every(r => r.freq === '不固定')
+      rules,
+      defaultLessonType: rules[0]?.lessonType || student.defaultLessonType || '1v1',
+      noRegularRule: ruleDraft.noRegularRule,
+      autoRescheduleOnCancel: ruleDraft.autoRescheduleOnCancel,
     });
-    setIsEditingRuleModal(false);
+    setRuleDraft(null);
     showToast('排課時段規則已更新儲存');
   };
-
-  // 執行臨時預約排課：全部交由 page 的統一預約入口（時間限制 / 教室調度 / 衝堂 / 額度替換）
-  const handleSubmitQuickBook = async () => {
-    const ok = await onSmartBook(
-      {
-        date: quickBookForm.date,
-        startHour: parseInt(quickBookForm.hour, 10),
-        startMin: parseInt(quickBookForm.minute, 10),
-        durationMins: 50,
-        teacherId: currentUserId,
-        studentId: student.id,
-        studentName: student.name,
-        roomType: quickBookForm.roomType,
-        lessonType: quickBookForm.lessonType,
-      },
-      {}
-    );
-    if (ok) setIsQuickBookModalOpen(false);
-  };
-
-  // 臨時預約彈窗：他人優先時段即時提示
-  const quickBookPriorityHint: string | null = isQuickBookModalOpen
-    ? getPriorityHint?.({
-        date: quickBookForm.date,
-        startHour: parseInt(quickBookForm.hour, 10),
-        startMin: parseInt(quickBookForm.minute, 10),
-        durationMins: 50,
-        teacherId: currentUserId,
-        studentId: student.id,
-        studentName: student.name,
-        roomType: quickBookForm.roomType,
-        lessonType: quickBookForm.lessonType,
-      }) ?? null
-    : null;
 
   // 續課簽署確認
   const handleConfirmPurchase = (studentSignUrl: string) => {
@@ -194,26 +139,31 @@ export default function StudentDetailView({
     showToast(`續課成功！已增加 ${buyCredits} 堂，目前剩餘 ${updatedCredits} 堂`);
   };
 
-  // 預估：場租老師 90 天內是否排不完（僅在彈窗開啟時試算，不寫入資料）
-  const horizonWarning = useMemo(() => {
-    if (!autoScheduleOpen || userRole === 'admin' || student.credits <= 0) return false;
+  // 試算兩種排課方式（僅在彈窗開啟時，不寫入資料）：90 天上限與需送審堂數直接顯示於彈窗內
+  const schedulePreview = useMemo(() => {
+    const none = { horizonWarning: false, append_remaining: 0, replace_future: 0 };
+    if (!autoScheduleOpen || student.credits <= 0) return none;
     try {
       const engine = new ScheduleEngine(bookings, teachers, Object.fromEntries([[student.id, student]]));
-      return (['append_remaining', 'replace_future'] as const).some(mode => {
-        const r = engine.generateSchedule({
-          sid: student.id, sName: student.name, teacherId: student.teacherId,
-          credits: student.credits, slots: student.rules, startFromDate: todayStr, todayStr,
-          priorityGrid: priorityGrid || {},
-          userRole, mode, maxWeeksLimit: 16,
-          targetCount: mode === 'append_remaining' ? quota.availableToSchedule : quota.replaceTotal
-        });
-        return !!r.hitHorizonLimit;
+      const run = (mode: 'append_remaining' | 'replace_future') => engine.generateSchedule({
+        sid: student.id, sName: student.name, teacherId: student.teacherId,
+        credits: student.credits, slots: student.rules, startFromDate: todayStr, todayStr,
+        priorityGrid: priorityGrid || {},
+        userRole, mode, maxWeeksLimit: 16,
+        targetCount: mode === 'append_remaining' ? quota.availableToSchedule : quota.replaceTotal
       });
-    } catch { return false; }
+      const append = run('append_remaining');
+      const replace = run('replace_future');
+      return {
+        horizonWarning: userRole !== 'admin' && (!!append.hitHorizonLimit || !!replace.hitHorizonLimit),
+        append_remaining: append.nonPriorityCount ?? 0,
+        replace_future: replace.nonPriorityCount ?? 0,
+      };
+    } catch { return none; }
   }, [autoScheduleOpen, userRole, student, bookings, teachers, todayStr, priorityGrid, quota.availableToSchedule, quota.replaceTotal]);
 
   // 執行自動排課（支援模式：'append_remaining' 接續排課 或 'replace_future' 重整未來）
-  const handleRunAutoSchedule = async (mode: 'append_remaining' | 'replace_future', startFromToday: boolean = true) => {
+  const handleRunAutoSchedule = (mode: 'append_remaining' | 'replace_future', startFromToday: boolean = true) => {
     if (student.credits <= 0) return systemAlert('學員剩餘堂數不足，請先購買續課');
 
     const engine = new ScheduleEngine(
@@ -240,10 +190,6 @@ export default function StudentDetailView({
     });
 
     if (result.success) {
-      // 實際有課堂以待審排入（僅一般老師；管理員直接生效）時才確認，與實際排入行為一致
-      if ((result.nonPriorityCount ?? 0) > 0) {
-        if (!await systemConfirm(`⚠️ 有 ${result.nonPriorityCount} 堂為其他老師優先時段（14 天前預約），排入後需經管理員審核，是否繼續進行排課？`)) return;
-      }
       // 依據引擎判斷，保留安全保護區（已簽到、已逾期、已取消），僅替換或追加純預約
       const cleanBookings = bookings.filter((b: any) => !result.removedBookingIds.includes(b.id));
       onAddBookings(result.newRecords, cleanBookings, mode);
@@ -273,6 +219,17 @@ export default function StudentDetailView({
   const isArchived = isArchivedStudent(student);
   const canArchive = userRole === 'admin' || student.teacherId === currentUserId;
 
+  const canClearUpcoming = userRole === 'admin' || student.teacherId === currentUserId;
+
+  const handleClearUpcoming = async () => {
+    const ok = await systemConfirm(
+      `確定要清空學員「${student.name}」所有尚未開課的 ${upcomingAndScheduled.length} 堂預排嗎？\n` +
+      '清空後這些課堂會標記為已取消（不扣學員堂數），且不會自動順延補排。\n開課前 24 小時內的課堂會標註超時取消。',
+      '清空所有預排'
+    );
+    if (ok) onClearUpcoming(student.id);
+  };
+
   const handleArchive = async () => {
     const ok = await systemConfirm(archiveConfirmMessage(student.name, upcomingAndScheduled.length));
     if (!ok) return;
@@ -288,7 +245,7 @@ export default function StudentDetailView({
   // 取消 / 改期一律交給 page 的 handleExecuteReschedule（含衝堂檢查、讓位、取消後自動順延）
   const handleConfirmReschedule = (p: BookingEditConfirmPayload) => {
     if (!editingBooking) return;
-    onExecuteReschedule(
+    const error: string | undefined = onExecuteReschedule(
       p.bookingId,
       p.date,
       p.hour,
@@ -298,7 +255,8 @@ export default function StudentDetailView({
       p.lessonType,
       p.autoSwaps
     );
-    setEditingBooking(null);
+    if (!error) setEditingBooking(null);
+    return error;
   };
 
   return (
@@ -319,11 +277,16 @@ export default function StudentDetailView({
 
       {/* 頂部排課規則與筆記卡片 */}
       <div className="bg-white p-3.5 rounded-3xl border border-slate-200 shadow-2xs space-y-2.5">
-        <div className="flex justify-between items-center font-bold text-slate-600 text-xs">
-          <span className="font-mono text-[11px] bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl shadow-2xs">
-            {formatRules(student.rules)}
-          </span>
-          <div className="flex items-center gap-1.5">
+        <div className="flex justify-between items-start gap-2 font-bold text-slate-600 text-xs">
+          <div className="min-w-0 space-y-1">
+            <span className="inline-block font-mono text-[11px] bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl shadow-2xs">
+              {formatStudentSchedule(student)}
+            </span>
+            <span className="block text-[10px] text-slate-400">
+              取消自動順延補排：{!isFlexible && student.autoRescheduleOnCancel ? '開啟' : '關閉'}
+            </span>
+          </div>
+          <div className="flex items-center justify-end gap-1.5 flex-wrap">
             <button 
               onClick={handleOpenRuleModal} 
               className="p-1 hover:bg-rose-50 rounded-lg text-rose-500 transition shadow-2xs border border-slate-100"
@@ -331,12 +294,21 @@ export default function StudentDetailView({
             >
               <Edit3 className="w-3.5 h-3.5"/>
             </button>
-            {!isArchived && (
+            {!isArchived && !isFlexible && (
               <button 
                 onClick={() => setAutoScheduleOpen(true)} 
                 className="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-xl font-bold flex items-center gap-1 border border-indigo-100 hover:bg-indigo-100 transition shadow-2xs"
               >
                 <Sparkles className="w-3 h-3"/> 自動排課
+              </button>
+            )}
+            {canClearUpcoming && (
+              <button
+                onClick={handleClearUpcoming}
+                disabled={upcomingAndScheduled.length === 0}
+                className="bg-white text-rose-600 px-2.5 py-1 rounded-xl font-bold flex items-center gap-1 border border-rose-200 hover:bg-rose-50 transition shadow-2xs disabled:text-slate-300 disabled:border-slate-200 disabled:cursor-not-allowed disabled:hover:bg-white"
+              >
+                <Trash2 className="w-3 h-3"/> 清空所有預排
               </button>
             )}
           </div>
@@ -360,7 +332,7 @@ export default function StudentDetailView({
         <div className="bg-rose-50 border border-rose-200 p-3 rounded-2xl text-xs text-rose-800 flex items-center gap-2 shadow-2xs animate-in fade-in">
           <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 animate-bounce" />
           <span className="font-bold">
-            堂數衝突提醒：目前已佔用 {occupiedQuotaCount} 堂，剩餘 {student.credits} 堂（透支 {overdrawnCount} 堂），請點擊「自動排課」重排以符合剩餘額度！
+            堂數衝突提醒：目前已佔用 {occupiedQuotaCount} 堂，剩餘 {student.credits} 堂（透支 {overdrawnCount} 堂），{isFlexible ? '請調整預排' : '請點擊「自動排課」重排'}以符合剩餘額度！
           </span>
         </div>
       )}
@@ -373,17 +345,7 @@ export default function StudentDetailView({
           </h3>
           {!isArchived && (
             <button 
-              onClick={() => {
-                const preset = getStudentBookingPreset(student, userRole);
-                setQuickBookForm({
-                  date: today,
-                  hour: '14',
-                  minute: '00',
-                  roomType: preset.roomType,
-                  lessonType: preset.lessonType
-                });
-                setIsQuickBookModalOpen(true);
-              }}
+              onClick={() => openGlobalBooking({ studentId: student.id })}
               className="w-7 h-7 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl text-rose-600 flex items-center justify-center font-bold transition shadow-2xs active:scale-95"
               title="臨時預約排課"
             >
@@ -526,114 +488,6 @@ export default function StudentDetailView({
         </button>
       )}
 
-      {/* ========================================================
-          臨時新增預約 Modal (標準三行規格，學員鎖定當前學員)
-      ======================================================== */}
-      {isQuickBookModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl p-5 shadow-2xl space-y-3.5 border border-slate-100 text-xs animate-in zoom-in-95">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-black text-slate-800 flex items-center gap-1.5">
-                <Plus className="w-4 h-4 text-rose-500" /> 新增預約 ({student.name})
-              </h3>
-              <button onClick={() => setIsQuickBookModalOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg transition text-slate-400">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-2.5">
-              {/* 學員資訊 (純顯示) */}
-              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center">
-                <span className="font-bold text-slate-700">學員：{student.name}</span>
-                <span className="font-mono text-rose-600 font-bold">剩餘 {student.credits} 堂</span>
-              </div>
-
-              {/* 第一行：預約日期 */}
-              <div>
-                <label className="text-slate-600 font-bold block mb-1">預約日期</label>
-                <input 
-                  type="date" 
-                  value={quickBookForm.date} 
-                  onChange={(e) => setQuickBookForm({ ...quickBookForm, date: e.target.value })} 
-                  className="w-full border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800" 
-                />
-              </div>
-
-              {/* 第二行：時和分 (以 10 分鐘為一單位) */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">時 (Hour)</label>
-                  <select 
-                    value={quickBookForm.hour} 
-                    onChange={(e) => setQuickBookForm({ ...quickBookForm, hour: e.target.value })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
-                  >
-                    {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">分 (10 分鐘為單位)</label>
-                  <select 
-                    value={quickBookForm.minute} 
-                    onChange={(e) => setQuickBookForm({ ...quickBookForm, minute: e.target.value })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 font-mono text-slate-800"
-                  >
-                    {minutes.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
-              </div>
-
-              {/* 第三行：教室選擇 (帶圓點色標) 與 課程種類 */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">教室選擇</label>
-                  <select 
-                    value={quickBookForm.roomType} 
-                    onChange={(e) => setQuickBookForm({ ...quickBookForm, roomType: e.target.value as any })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
-                  >
-                    <option value="large">🟣 大教室</option>
-                    <option value="small">🟢 小教室</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-slate-600 font-bold block mb-1">課程種類</label>
-                  <select 
-                    value={quickBookForm.lessonType} 
-                    onChange={(e) => setQuickBookForm({ ...quickBookForm, lessonType: e.target.value as any })} 
-                    className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 font-bold outline-none focus:ring-1 focus:ring-rose-400 text-slate-800"
-                  >
-                    <option value="1v1">1v1 單人</option>
-                    <option value="1v2">1v2 雙人</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            {quickBookPriorityHint && (
-              <div className="rounded-2xl border-2 border-rose-400 bg-rose-50 p-3 font-black text-rose-700 leading-relaxed">
-                {quickBookPriorityHint}
-              </div>
-            )}
-
-            <div className="pt-2 flex gap-2">
-              <button 
-                onClick={() => setIsQuickBookModalOpen(false)} 
-                className="flex-1 bg-slate-100 hover:bg-slate-200 transition py-2.5 rounded-xl font-bold text-slate-600"
-              >
-                取消
-              </button>
-              <button 
-                onClick={handleSubmitQuickBook} 
-                className="flex-1 bg-rose-500 hover:bg-rose-600 transition text-white py-2.5 rounded-xl font-bold shadow-xs"
-              >
-                確認預約
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 變更 / 取消預約 Modal (共用元件) */}
       <BookingEditModal
         booking={editingBooking}
@@ -760,135 +614,20 @@ export default function StudentDetailView({
       )}
 
       {/* 排課時段規則設定 Modal */}
-      {isEditingRuleModal && (
+      {ruleDraft && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 border border-slate-100 text-xs animate-in zoom-in-95 max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center border-b pb-2 shrink-0">
               <h3 className="text-sm font-black text-slate-800">排課時段規則</h3>
-              <button onClick={() => setIsEditingRuleModal(false)} className="p-1 hover:bg-slate-100 rounded-lg transition"><X className="w-4 h-4 text-slate-400" /></button>
+              <button onClick={() => setRuleDraft(null)} className="p-1 hover:bg-slate-100 rounded-lg transition"><X className="w-4 h-4 text-slate-400" /></button>
             </div>
             
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-              <div className="space-y-3">
-                <label className="font-bold text-slate-800 block">排課時段列表</label>
-                {tempRules.length === 0 && <p className="text-slate-400 text-center py-2">目前無排課規則</p>}
-                
-                {tempRules.map((r, index) => {
-                  const [hStr, mStr] = (r.time || '10:00').split(':');
-                  return (
-                    <div key={index} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2 relative shadow-2xs">
-                      {tempRules.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => setTempRules(tempRules.filter((_, i) => i !== index))}
-                          className="absolute top-2 right-2 p-1 bg-white border border-slate-200 rounded text-slate-400 hover:text-rose-500 transition"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      )}
-                      
-                      {/* 第一行：頻率、種類、教室 */}
-                      <div className="grid grid-cols-3 gap-1.5 [&>div]:min-w-0">
-                        <div>
-                          <label className="font-bold text-slate-600 text-[10px]">頻率</label>
-                          <select
-                            value={r.freq}
-                            onChange={(e) => handleUpdateTempRule(index, 'freq', e.target.value)}
-                            className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                          >
-                            <option value="每週">每週</option>
-                            <option value="隔週">隔週</option>
-                            <option value="不固定">不固定 (不自動排)</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="font-bold text-slate-600 text-[10px]">課程種類</label>
-                          <select
-                            value={r.lessonType || '1v1'}
-                            onChange={e => handleUpdateTempRule(index, 'lessonType', e.target.value)}
-                            className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                          >
-                            <option value="1v1">1v1 單人</option>
-                            <option value="1v2">1v2 雙人</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="font-bold text-slate-600 text-[10px]">指定教室</label>
-                          <select
-                            value={r.roomType || 'small'}
-                            onChange={e => handleUpdateTempRule(index, 'roomType', e.target.value)}
-                            className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                          >
-                            <option value="small" disabled={r.lessonType === '1v2'}>🟢 小</option>
-                            <option value="large">🟣 大</option>
-                          </select>
-                        </div>
-                      </div>
-                      
-                      {/* 第二行：星期、時、分、起始日 */}
-                      {r.freq !== '不固定' && (
-                        <>
-                          <div className="grid grid-cols-3 gap-2 [&>div]:min-w-0">
-                            <div>
-                              <label className="font-bold text-slate-600 text-[10px]">星期</label>
-                              <select
-                                value={r.day}
-                                onChange={(e) => handleUpdateTempRule(index, 'day', e.target.value)}
-                                className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
-                              >
-                                {['一', '二', '三', '四', '五', '六', '日'].map(d => <option key={d} value={d}>週{d}</option>)}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="font-bold text-slate-600 text-[10px]">時</label>
-                              <select
-                                value={hStr}
-                                onChange={(e) => handleUpdateTempTime(index, 'h', e.target.value)}
-                                className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
-                              >
-                                {hours.map(h => <option key={h} value={h < 10 ? `0${h}` : String(h)}>{h < 10 ? `0${h}` : h}</option>)}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="font-bold text-slate-600 text-[10px]">分</label>
-                              <select
-                                value={mStr}
-                                onChange={(e) => handleUpdateTempTime(index, 'm', e.target.value)}
-                                className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
-                              >
-                                {minutes.map(m => <option key={m} value={m}>{m}</option>)}
-                              </select>
-                            </div>
-                          </div>
-                          <div>
-                            <label className="font-bold text-slate-600 text-[10px]">起始排課日</label>
-                            <input
-                              type="date"
-                              value={r.startDate || todayStr}
-                              onChange={(e) => handleUpdateTempRule(index, 'startDate', e.target.value)}
-                              className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none font-mono"
-                            />
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => {
-                    const preset = getStudentBookingPreset(student, userRole);
-                    setTempRules([...tempRules, { id: genId('r'), freq: '每週', day: '一', time: '10:00', startDate: todayStr, lessonType: preset.lessonType, roomType: preset.roomType }]);
-                  }}
-                  className="w-full border border-dashed border-slate-300 text-slate-500 font-bold py-2 rounded-xl hover:bg-slate-50 transition flex items-center justify-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5" /> 新增時段
-                </button>
-              </div>
+            <div className="flex-1 overflow-y-auto pr-1">
+              <ScheduleRulesEditor value={ruleDraft} onChange={setRuleDraft} today={todayStr} createRule={createRule} />
             </div>
             
             <div className="pt-2 flex gap-2 shrink-0 border-t border-slate-100">
-              <button onClick={() => setIsEditingRuleModal(false)} className="flex-1 bg-slate-100 hover:bg-slate-200 transition py-2.5 rounded-xl font-bold text-slate-600">取消</button>
+              <button onClick={() => setRuleDraft(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 transition py-2.5 rounded-xl font-bold text-slate-600">取消</button>
               <button onClick={handleSaveRules} className="flex-1 bg-rose-500 hover:bg-rose-600 transition text-white py-2.5 rounded-xl font-bold shadow-xs">儲存設定</button>
             </div>
           </div>
@@ -970,7 +709,7 @@ export default function StudentDetailView({
                 </div>
               )}
 
-              {horizonWarning && (
+              {schedulePreview.horizonWarning && (
                 <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 font-bold text-[11px] leading-relaxed">
                   ⚠️ 場租老師最多只能預約未來 3 個月內的教室，超出日期的剩餘堂數將暫不排入（待日後日期開放再補排）。
                 </div>
@@ -992,6 +731,11 @@ export default function StudentDetailView({
                 <span className="text-[10px] text-indigo-100 font-normal">
                   保留原本的 {quota.pendingCount + quota.confirmedFutureCount} 堂課，把剩下的 {quota.availableToSchedule} 堂往後接續排完
                 </span>
+                {schedulePreview.append_remaining > 0 && (
+                  <span className="mt-1 text-[10px] font-black bg-amber-100 text-amber-900 rounded-lg px-2 py-1">
+                    ⚠️ 其中 {schedulePreview.append_remaining} 堂為其他老師優先時段（14 天前預約），排入後需經管理員審核
+                  </span>
+                )}
               </button>
 
               <button
@@ -1003,6 +747,11 @@ export default function StudentDetailView({
                 <span className="text-[10px] text-slate-300 font-normal">
                   清空還沒上的課（待審核課堂保留），從今天開始重新排滿 {quota.replaceTotal} 堂
                 </span>
+                {schedulePreview.replace_future > 0 && (
+                  <span className="mt-1 text-[10px] font-black bg-amber-100 text-amber-900 rounded-lg px-2 py-1">
+                    ⚠️ 其中 {schedulePreview.replace_future} 堂為其他老師優先時段（14 天前預約），排入後需經管理員審核
+                  </span>
+                )}
               </button>
 
               <button

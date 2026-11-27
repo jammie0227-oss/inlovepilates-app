@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { X, AlertTriangle } from 'lucide-react';
 import { formatTimeStr, formatDateWithDay } from '../mockData';
 import type { StudentItem, TeacherProfile } from '../types';
@@ -10,8 +10,7 @@ import {
   validateAndBuildBooking,
 } from '../utils/bookingRules';
 import type { AutoSwapItem, PriorityGrid } from '../utils/bookingRules';
-import { systemAlert } from '../utils/systemAlert';
-
+import BookingCheckCard from './BookingCheckCard';
 
 export interface BookingEditConfirmPayload {
   bookingId: string;
@@ -42,12 +41,19 @@ interface BookingEditModalProps {
   teachers?: Record<string, TeacherProfile>;
   students?: StudentItem[];
   onClose: () => void;
-  onConfirm: (payload: BookingEditConfirmPayload) => void;
+  /** 寫入失敗時回傳錯誤訊息（顯示於彈窗內、彈窗保持開啟） */
+  onConfirm: (payload: BookingEditConfirmPayload) => string | undefined;
 }
 
 const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
 
-export default function BookingEditModal({
+/** 每次開啟新的課堂即以該課堂內容重建表單 */
+export default function BookingEditModal({ booking, ...rest }: BookingEditModalProps) {
+  if (!booking) return null;
+  return <BookingEditDialog key={booking.id} booking={booking} {...rest} />;
+}
+
+function BookingEditDialog({
   booking,
   userRole,
   today,
@@ -60,56 +66,31 @@ export default function BookingEditModal({
   onClose,
   onConfirm,
 }: BookingEditModalProps) {
-  const [date, setDate] = useState('');
-  const [hour, setHour] = useState('10');
-  const [min, setMin] = useState('00');
-  const [room, setRoom] = useState<'large' | 'small'>('small');
-  const [lessonType, setLessonType] = useState<'1v1' | '1v2'>('1v1');
+  const [date, setDate] = useState<string>(booking.date);
+  const [hour, setHour] = useState(pad(booking.startHour));
+  const [min, setMin] = useState(pad(booking.startMin));
+  const [room, setRoom] = useState<'large' | 'small'>(booking.roomType || 'small');
+  const [lessonType, setLessonType] = useState<'1v1' | '1v2'>(booking.lessonType || '1v1');
+  // 寫入時才發現的錯誤；表單內容一變動即失效
+  const [submitError, setSubmitError] = useState<{ form: string; message: string } | null>(null);
+  const formKey = [date, hour, min, room, lessonType].join('|');
 
-  // 每次開啟（booking 變動）重設表單
-  useEffect(() => {
-    if (!booking) return;
-    setDate(booking.date);
-    setHour(pad(booking.startHour));
-    setMin(pad(booking.startMin));
-    setRoom(booking.roomType || 'small');
-    setLessonType(booking.lessonType || '1v1');
-  }, [booking]);
+  const newHour = parseInt(hour, 10);
+  const newMin = parseInt(min, 10);
+  const isUnchanged =
+    date === booking.date &&
+    newHour === booking.startHour &&
+    newMin === booking.startMin &&
+    room === (booking.roomType || 'small') &&
+    lessonType === (booking.lessonType || '1v1');
+  // 僅改教室（日期時間不變）時略過時間限制；其餘一律走共用驗證
+  const timeUnchanged =
+    date === booking.date && newHour === booking.startHour && newMin === booking.startMin;
 
-  const isUnchanged = useMemo(() => {
-    if (!booking) return true;
-    return (
-      date === booking.date &&
-      parseInt(hour, 10) === booking.startHour &&
-      min === pad(booking.startMin) &&
-      room === (booking.roomType || 'small') &&
-      lessonType === (booking.lessonType || '1v1')
-    );
-  }, [booking, date, hour, min, room, lessonType]);
-
-  if (!booking) return null;
-
-  // 僅供提示：24 小時內取消仍直接生效，只標註超時取消
-  const isLateWindow = isWithin24HoursRule(booking.date, booking.startHour, booking.startMin);
-
-  // 教室自動連動：切換課程類別時帶入預設教室（1v2 → 大、1v1 → 小）
-  const handleLessonTypeChange = (next: '1v1' | '1v2') => {
-    setLessonType(next);
-    setRoom(next === '1v2' ? 'large' : 'small');
-  };
-
-  const handleConfirm = (isCancel: boolean) => {
-    if (!isCancel && isUnchanged) return;
-    let finalRoom = room;
-    let autoSwaps: AutoSwapItem[] | undefined;
-
-    if (!isCancel) {
-      const newHour = parseInt(hour, 10);
-      const newMin = parseInt(min, 10);
-      // 僅改教室（日期時間不變）時略過時間限制；其餘一律走共用驗證
-      const timeUnchanged =
-        date === booking.date && newHour === booking.startHour && newMin === booking.startMin;
-      const res = validateAndBuildBooking({
+  // 即時檢測：結果直接顯示於彈窗內
+  const check = cancelOnly || isUnchanged
+    ? null
+    : validateAndBuildBooking({
         input: {
           date,
           startHour: newHour,
@@ -132,33 +113,34 @@ export default function BookingEditModal({
         skipTimeConstraints: timeUnchanged,
         skipQuota: true,
       });
-      if (!res.ok || !res.booking) {
-        systemAlert(`【無法變更】\n${res.error || '此時段無法預約'}`);
-        return;
-      }
-      finalRoom = res.booking.roomType;
-      const notice = res.notices[0];
-      autoSwaps = res.autoSwaps.length ? res.autoSwaps : undefined;
+  // 系統把教室導回原值後與原課堂完全相同：不視為異動
+  const hasNoEffect =
+    !!check?.booking && timeUnchanged &&
+    check.booking.roomType === booking.roomType && lessonType === booking.lessonType;
+  const canChange = !!check?.ok && !hasNoEffect;
 
-      // 系統把教室導回原值後與原課堂完全相同：不視為異動，不寫入改期紀錄 / 通知
-      if (timeUnchanged && finalRoom === booking.roomType && lessonType === booking.lessonType) {
-        systemAlert(`【課堂未變更】\n${notice ? `${notice}。\n` : ''}調整後的結果與原課堂相同，未做任何變更。`);
-        return;
-      }
-      // 無讓位的教室導正改用彈窗提示（toast 會立刻被「改期完成」覆蓋）；讓位結果由完成提示說明
-      if (notice && !autoSwaps) systemAlert(`【教室調度】\n${notice}`);
-    }
+  // 僅供提示：24 小時內取消仍直接生效，只標註超時取消
+  const isLateWindow = isWithin24HoursRule(booking.date, booking.startHour, booking.startMin);
 
-    onConfirm({
+  // 教室自動連動：切換課程類別時帶入預設教室（1v2 → 大、1v1 → 小）
+  const handleLessonTypeChange = (next: '1v1' | '1v2') => {
+    setLessonType(next);
+    setRoom(next === '1v2' ? 'large' : 'small');
+  };
+
+  const handleConfirm = (isCancel: boolean) => {
+    if (!isCancel && !canChange) return;
+    const error = onConfirm({
       bookingId: booking.id,
       date,
-      hour: parseInt(hour, 10),
-      min: parseInt(min, 10),
-      roomType: finalRoom,
+      hour: newHour,
+      min: newMin,
+      roomType: !isCancel && check?.booking ? check.booking.roomType : room,
       lessonType,
       isCancel,
-      autoSwaps,
+      autoSwaps: !isCancel && check?.autoSwaps.length ? check.autoSwaps : undefined,
     });
+    setSubmitError(error ? { form: formKey, message: error } : null);
   };
 
   const selectCls =
@@ -251,6 +233,20 @@ export default function BookingEditModal({
         </div>
         )}
 
+        {hasNoEffect ? (
+          <div role="alert" className="rounded-2xl border border-amber-300 bg-amber-50 p-3 font-bold text-amber-800 leading-relaxed">
+            ℹ️ {check?.notices[0] ? `教室調度：${check.notices[0]}。` : ''}調整後的結果與原課堂相同，無法變更。
+          </div>
+        ) : (
+          <BookingCheckCard result={check} userRole={userRole} teachers={teachers} />
+        )}
+
+        {submitError?.form === formKey && (
+          <div role="alert" className="rounded-2xl border-2 border-rose-400 bg-rose-50 p-3 font-black text-rose-700 leading-relaxed whitespace-pre-line">
+            ⛔ {submitError.message.replace(/^【[^】]+】\n?/, '')}
+          </div>
+        )}
+
         {isLateWindow && (
           <div className="flex items-start gap-1.5 p-2.5 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 font-bold text-[11px] leading-relaxed">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
@@ -263,9 +259,9 @@ export default function BookingEditModal({
           {!cancelOnly && (
           <button
             onClick={() => handleConfirm(false)}
-            disabled={isUnchanged}
+            disabled={!canChange}
             className={`py-2.5 rounded-xl font-bold transition shadow-xs text-xs ${
-              isUnchanged
+              !canChange
                 ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
                 : 'bg-slate-800 hover:bg-slate-700 text-white'
             }`}

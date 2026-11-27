@@ -27,7 +27,7 @@ export const systemAlert = (message: string, title?: string): void => {
   }
   const payload = { title: t || '系統提醒', message: body };
   if (listener) listener(payload);
-  else if (typeof window !== 'undefined') window.alert(`${payload.title}\n${payload.message}`);
+  else console.warn(`${payload.title}\n${payload.message}`);
 };
 
 // ------------------------------------------
@@ -69,5 +69,8 @@ export const systemConfirm = (message: string, title?: string): Promise<boolean>
   new Promise(resolve => {
     const { title: t, body } = splitTitle(message, title);
     if (dialogListener) dialogListener({ title: t, message: body, resolve });
-    else resolve(typeof window !== 'undefined' ? window.confirm(`${t}\n${body}`) : false);
+    else {
+      console.warn(`尚未掛載確認彈窗，視為取消：${t}`);
+      resolve(false);
+    }
   });
