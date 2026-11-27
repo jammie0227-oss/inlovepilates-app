@@ -112,6 +112,22 @@ export const isOverdueUnsettled = (
   now: Date = new Date(),
 ): boolean => occupiesQuota(b) && !isFutureLesson(b.date, b.startHour, b.startMin, now);
 
+/** 依開課日期時間由早到晚排序 */
+export const compareByStart = (
+  a: Pick<BookingItem, 'date' | 'startHour' | 'startMin'>,
+  b: Pick<BookingItem, 'date' | 'startHour' | 'startMin'>,
+): number => a.date.localeCompare(b.date) || a.startHour * 60 + a.startMin - (b.startHour * 60 + b.startMin);
+
+/** 學員的下堂課：尚未開課、佔額度的預約中最早的一堂 */
+export const findNextLesson = (
+  bookings: BookingItem[],
+  student: { id: string; name: string },
+  now: Date = new Date(),
+): BookingItem | undefined =>
+  bookings
+    .filter(b => matchesStudent(student, b.studentId, b.studentName) && occupiesQuota(b) && !isOverdueUnsettled(b, now))
+    .sort(compareByStart)[0];
+
 /** 已封存學員不可再被排課（下拉選單與自動順延一律排除） */
 export const isArchivedStudent = (s: Pick<StudentItem, 'status'>): boolean => s.status === 'archived';
 
@@ -537,6 +553,9 @@ export const validateAndBuildBooking = ({
     errorKind,
   });
 
+  // 日期欄被清空時，後續日期運算會得到 NaN 而繞過時間與衝堂規則
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) return fail('請選擇預約日期', 'time');
+
   // 1. 教室調度（先決定最終教室，優先時段才能以最終教室比對）
   const assignment = resolveRoomAssignment({
     dateStr: input.date,
@@ -893,6 +912,13 @@ export const setLogReadBy = <T extends ReadableLog>(
 /** 管理員代一般老師異動的通知分級（不論距開課時數）：取消、改期為重要；改室為提醒 */
 export const getAdminOverrideSeverity = (action: '取消' | '改期' | '改室'): 'red' | 'yellow' =>
   action === '改室' ? 'yellow' : 'red';
+
+/**
+ * 老師取消自己課堂的通知分級（代他人取消走 getAdminOverrideSeverity）：
+ * 管理員一律一般（灰），含 24 小時內超時取消；一般老師超時取消為提醒（黃）
+ */
+export const getSelfCancelSeverity = (isAdmin: boolean, isLateCancel: boolean): 'yellow' | 'gray' =>
+  !isAdmin && isLateCancel ? 'yellow' : 'gray';
 
 /** 全站唯一的操作時間格式：YYYY/MM/DD HH:mm */
 export const formatTimestamp = (d: Date = new Date()): string =>

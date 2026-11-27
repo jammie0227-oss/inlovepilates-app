@@ -6,10 +6,11 @@ import {
   getExactTimestamp, 
   ScheduleEngine, 
   formatDateWithDay, 
+  formatTimeStr, 
   ScheduleEngineResult 
 } from '../mockData';
 
-import { formatRules, isOverdueUnsettled, isArchivedStudent, countScheduledLessons, archiveConfirmMessage, matchesStudent, DAY_HOURS, REVIEW_TAG } from '../utils/bookingRules';
+import { formatRules, isOverdueUnsettled, isArchivedStudent, countScheduledLessons, archiveConfirmMessage, matchesStudent, DAY_HOURS, REVIEW_TAG, findNextLesson } from '../utils/bookingRules';
 import { useNow } from '../utils/useToday';
 import { systemAlert, systemConfirm } from '../utils/systemAlert';
 
@@ -87,13 +88,18 @@ export default function Tab3StudentManagement({
       return true;
     });
 
-    list.sort((a: any, b: any) => {
-      let valA = sortField === 'name' ? a.name : (a.nextLesson || '9999-12-31');
-      let valB = sortField === 'name' ? b.name : (b.nextLesson || '9999-12-31');
+    // 下堂課一律由實際預約推導；沒有預排者排在最後
+    const rows = list.map((s: any) => ({ ...s, next: findNextLesson(bookings, s, now) }));
+    const nextKey = (r: any) => r.next
+      ? `${r.next.date} ${formatTimeStr(r.next.startHour, r.next.startMin)}`
+      : '9999';
+    rows.sort((a: any, b: any) => {
+      const valA = sortField === 'name' ? a.name : nextKey(a);
+      const valB = sortField === 'name' ? b.name : nextKey(b);
       return sortDesc ? valB.localeCompare(valA) : valA.localeCompare(valB);
     });
-    return list;
-  }, [myStudents, sortField, sortDesc]);
+    return rows;
+  }, [myStudents, bookings, now, sortField, sortDesc]);
 
   const archivedStudents = useMemo(() => myStudents.filter(isArchivedStudent), [myStudents]);
 
@@ -182,7 +188,6 @@ export default function Tab3StudentManagement({
         return;
       }
 
-      const trialLessonTime = `${formatDateWithDay(trialDate)} ${trialHour}:${trialMin}`;
       const trialPurchases = [{
         id: genId('p-init'),
         date: trialDate,
@@ -206,7 +211,6 @@ export default function Tab3StudentManagement({
         noRegularRule: true,
         rules: [],
         status: 'active' as const,
-        nextLesson: trialLessonTime,
         purchases: trialPurchases
       };
 
@@ -243,7 +247,6 @@ export default function Tab3StudentManagement({
         noRegularRule: isNoRegular,
         rules: newRules,
         status: 'active' as const,
-        nextLesson: isNoRegular ? '不固定排課' : `週${newRules[0]?.day} ${newRules[0]?.time}`,
         purchases: initialPurchases
       };
 
@@ -356,7 +359,7 @@ export default function Tab3StudentManagement({
                   </td>
                   <td className="py-3.5 px-3 font-sans font-bold text-slate-800">
                     <div className="flex flex-col gap-0.5">
-                      <span>{s.nextLesson || '未排定'}</span>
+                      <span>{s.next ? `${formatDateWithDay(s.next.date)} ${formatTimeStr(s.next.startHour, s.next.startMin)}` : '未排定'}</span>
                       <span className="text-[10px] text-slate-400 font-mono">{formatRules(s.rules)}</span>
                     </div>
                   </td>

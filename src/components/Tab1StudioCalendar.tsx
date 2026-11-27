@@ -82,7 +82,6 @@ export default function Tab1StudioCalendar({
     setAdminEditingBooking(b);
   };
   const handleAdminEditConfirm = (p: BookingEditConfirmPayload) => {
-    if (!p.isCancel && p.notice) showToast(p.notice);
     onExecuteReschedule?.(p.bookingId, p.date, p.hour, p.min, p.roomType, p.isCancel, p.lessonType, p.autoSwaps);
     setAdminEditingBooking(null);
   };
@@ -338,6 +337,8 @@ export default function Tab1StudioCalendar({
                 </div>
               ))}
             </div>
+            {/* 底部留白：23:00 可捲到身分切換浮鈕上方 */}
+            <div className="h-10" />
           </div>
         </div>
       )}
@@ -439,6 +440,8 @@ export default function Tab1StudioCalendar({
                   </div>
                 ))}
               </div>
+              {/* 底部留白：23:00 可捲到身分切換浮鈕上方 */}
+              <div className="h-10" />
             </div>
           </div>
         </div>

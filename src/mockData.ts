@@ -560,8 +560,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     bgLight: 'bg-amber-100',
     border: 'border-amber-400',
     text: 'text-amber-900',
-    isActive: true,
-    monthlyQuota: 3
+    isActive: true
   },
   't-1': {
     id: 't-1',
@@ -571,8 +570,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     bgLight: 'bg-sky-100',
     border: 'border-sky-400',
     text: 'text-sky-900',
-    isActive: true,
-    monthlyQuota: 3
+    isActive: true
   },
   't-2': {
     id: 't-2',
@@ -582,8 +580,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     bgLight: 'bg-emerald-100',
     border: 'border-emerald-400',
     text: 'text-emerald-900',
-    isActive: true,
-    monthlyQuota: 3
+    isActive: true
   },
   't-3': {
     id: 't-3',
@@ -593,8 +590,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     bgLight: 'bg-purple-100',
     border: 'border-purple-400',
     text: 'text-purple-900',
-    isActive: true,
-    monthlyQuota: 3
+    isActive: true
   },
   't-4': {
     id: 't-4',
@@ -604,8 +600,7 @@ export const INITIAL_TEACHERS: Record<string, TeacherProfile> = {
     bgLight: 'bg-pink-100',
     border: 'border-pink-400',
     text: 'text-pink-950',
-    isActive: true,
-    monthlyQuota: 3
+    isActive: true
   }
 };
 
@@ -623,7 +618,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-d-1', freq: '每週', day: '二', time: '10:00', startDate: '2026-10-27', lessonType: '1v1', roomType: 'small' }],
     status: 'active',
-    nextLesson: '11/03(二) 10:00',
     purchases: []
   },
   {
@@ -638,7 +632,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-d-2', freq: '隔週', day: '五', time: '18:00', startDate: '2026-10-30', lessonType: '1v2', roomType: 'large' }],
     status: 'active',
-    nextLesson: '10/30(五) 18:00',
     purchases: []
   },
   {
@@ -653,7 +646,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-d-3', freq: '每週', day: '三', time: '15:00', startDate: '2026-11-04', lessonType: '1v1', roomType: 'large' }],
     status: 'active',
-    nextLesson: '11/04(三) 15:00',
     purchases: []
   },
   {
@@ -668,7 +660,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-3', freq: '每週', day: '一', time: '14:00', startDate: '2026-11-02', lessonType: '1v1', roomType: 'large' }],
     status: 'active',
-    nextLesson: '11/02(一) 14:00',
     purchases: []
   },
 
@@ -685,7 +676,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-1', freq: '每週', day: '六', time: '09:00', startDate: '2026-10-31', lessonType: '1v1', roomType: 'small' }],
     status: 'active',
-    nextLesson: '10/31(六) 09:00',
     purchases: [
       { id: 'p-1', date: '2026-10-01', credits: 10, price: 22000, teacherName: 'Abby', studentName: '王小美', signedAt: '2026/10/01 14:00' }
     ]
@@ -702,7 +692,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-2', freq: '每週', day: '六', time: '10:00', startDate: '2026-10-31', lessonType: '1v2', roomType: 'large' }],
     status: 'active',
-    nextLesson: '10/31(六) 10:00',
     purchases: []
   },
   {
@@ -717,7 +706,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-a-3', freq: '每週', day: '四', time: '15:00', startDate: '2026-10-29', lessonType: '1v1', roomType: 'small' }],
     status: 'active',
-    nextLesson: '11/05(四) 15:00',
     purchases: []
   },
 
@@ -734,7 +722,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-5', freq: '每週', day: '日', time: '10:00', startDate: '2026-11-01', lessonType: '1v1', roomType: 'small' }],
     status: 'active',
-    nextLesson: '11/01(日) 10:00',
     purchases: []
   },
   {
@@ -749,7 +736,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-t-2', freq: '每週', day: '三', time: '11:00', startDate: '2026-10-28', lessonType: '1v1', roomType: 'large' }],
     status: 'active',
-    nextLesson: '11/04(三) 11:00',
     purchases: []
   },
 
@@ -766,7 +752,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-4', freq: '每週', day: '三', time: '14:00', startDate: '2026-11-04', lessonType: '1v1', roomType: 'small' }],
     status: 'active',
-    nextLesson: '11/04(三) 14:00',
     purchases: []
   },
   {
@@ -781,7 +766,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-c-2', freq: '每週', day: '二', time: '19:00', startDate: '2026-10-27', lessonType: '1v2', roomType: 'large' }],
     status: 'active',
-    nextLesson: '11/03(二) 19:00',
     purchases: []
   },
 
@@ -798,7 +782,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-ta-1', freq: '每週', day: '五', time: '10:00', startDate: '2026-11-27', lessonType: '1v1', roomType: 'small' }],
     status: 'active',
-    nextLesson: '11/27(五) 10:00',
     purchases: []
   },
   {
@@ -813,7 +796,6 @@ export const INITIAL_STUDENTS: StudentItem[] = [
     isTrial: false,
     rules: [{ id: 'r-ta-2', freq: '每週', day: '五', time: '14:00', startDate: '2026-11-27', lessonType: '1v2', roomType: 'large' }],
     status: 'active',
-    nextLesson: '11/27(五) 14:00',
     purchases: []
   }
 ];

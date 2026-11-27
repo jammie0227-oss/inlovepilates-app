@@ -54,6 +54,7 @@ import {
   isLogVisibleTo,
   isArchivedStudent,
   getAdminOverrideSeverity,
+  getSelfCancelSeverity,
 } from '../utils/bookingRules';
 import type { AutoSwapItem, BookingRequestInput } from '../utils/bookingRules';
 import { useToday } from '../utils/useToday';
@@ -740,7 +741,7 @@ export default function Home() {
       if (isAdminOverride) {
         logAdminOverride(`${cancelDetail}（時段已釋出，學員堂數不扣）`, '取消');
       } else {
-        addLog(cancelDetail, '取消', isLateCancel ? 'yellow' : 'normal', target.studentName, target.teacherId, undefined, undefined, actorName);
+        addLog(cancelDetail, '取消', getSelfCancelSeverity(userRole === 'admin', isLateCancel), target.studentName, target.teacherId, undefined, undefined, actorName);
       }
 
       // 取消生效後檢查額度，有空位才自動順延補排一堂（起點不早於今天）
@@ -886,7 +887,7 @@ export default function Home() {
         // 學生未到忘記取消：比照一般取消直接生效（不扣堂、釋出時段、順延補排）
         addLog(
           `原課堂：${formatDateWithDay(b.date)} ${formatTimeStr(b.startHour, b.startMin)}\n結果：${LATE_CANCEL_LABEL}\n事由：${draft.reason || '老師回報未到課'}`,
-          '取消', 'yellow', b.studentName, b.teacherId
+          '取消', getSelfCancelSeverity(b.teacherId === ADMIN_ID, true), b.studentName, b.teacherId
         );
         settledMap[b.id] = { status: 'cancelled_normal', isLateCancel: true, cancelledAt: settleTs };
         cancelledList.push(b);
@@ -1362,8 +1363,9 @@ export default function Home() {
         </div>
 
         {/* 核心滾動區域 (解決錨定鎖定凍結，推高底部避開導航欄) */}
-        <main className="flex-1 min-h-0 overflow-y-auto p-3 md:p-5 pb-20">
-          
+        {/* md:p-5 會蓋掉 pb-20，需補 md:pb-20 才不會被底部導覽列遮住 */}
+        <main className="flex-1 min-h-0 overflow-y-auto p-3 md:p-5 pb-20 md:pb-20">
+
             {/* Tab 1: 排班總覽（打通高度伸展） */}
             <div className={activeTab === 1 && !selectedStudentId && !selectedTeacherId ? 'flex flex-col h-full min-h-0 flex-1' : 'hidden'}>
               <Tab1StudioCalendar

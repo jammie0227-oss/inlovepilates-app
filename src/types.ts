@@ -13,7 +13,6 @@ export interface TeacherProfile {
   text: string;
   isActive: boolean;
   notes?: string;
-  monthlyQuota?: number;
 }
 export interface PresetColor {
   id: string;
@@ -58,7 +57,6 @@ export interface StudentItem {
   noRegularRule?: boolean;
   rules: StudentRule[];
   status: 'active' | 'archived';
-  nextLesson?: string;
   purchases?: PurchaseRecord[];
 }
 

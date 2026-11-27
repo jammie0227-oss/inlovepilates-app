@@ -12,7 +12,7 @@ import {
 
 import { BookingStatusBadge, CanvasPad, CanvasPadModal, SignatureZoomModal } from './SignatureModals';
 import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
-import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DAY_HOURS, REVIEW_TAG, isOverdueUnsettled, getSignatureWindowStatus, isPendingApproval, occupiesQuota, matchesStudent, getScheduleQuota, isArchivedStudent, archiveConfirmMessage } from '../utils/bookingRules';
+import { getStudentBookingPreset, formatRules, BUSINESS_MINUTES, DAY_HOURS, REVIEW_TAG, isOverdueUnsettled, getSignatureWindowStatus, isPendingApproval, occupiesQuota, matchesStudent, getScheduleQuota, isArchivedStudent, archiveConfirmMessage, compareByStart } from '../utils/bookingRules';
 import { systemAlert, systemConfirm } from '../utils/systemAlert';
 import { useNow } from '../utils/useToday';
 
@@ -73,8 +73,9 @@ export default function StudentDetailView({
   const now = useNow();
   // 逾期未處理（已開課、未簽、未取消）與預排互斥，口徑同 Tab 2 / Tab 4
   const overdueBookings = studentBookings.filter((b: any) => isOverdueUnsettled(b, now));
-  const upcomingAndScheduled = studentBookings.filter((b: any) => occupiesQuota(b) && !isOverdueUnsettled(b, now)).sort((a: any, b: any) => a.date.localeCompare(b.date));
-  const historyLessons = studentBookings.filter((b: any) => b.status === 'confirmed' && (b.signed || isOverdueUnsettled(b, now))).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  const upcomingAndScheduled = studentBookings.filter((b: any) => occupiesQuota(b) && !isOverdueUnsettled(b, now)).sort(compareByStart);
+  const historyLessons = studentBookings.filter((b: any) => b.status === 'confirmed' && (b.signed || isOverdueUnsettled(b, now)))
+    .sort((a: any, b: any) => compareByStart(b, a)); // 最新在前，收合時顯示最近 5 堂
   const purchases = [...(student.purchases || [])].sort((a: any, b: any) => b.date.localeCompare(a.date));
 
   // 堂數透支檢核：預排堂數超過剩餘堂數
@@ -287,7 +288,6 @@ export default function StudentDetailView({
   // 取消 / 改期一律交給 page 的 handleExecuteReschedule（含衝堂檢查、讓位、取消後自動順延）
   const handleConfirmReschedule = (p: BookingEditConfirmPayload) => {
     if (!editingBooking) return;
-    if (!p.isCancel && p.notice) showToast(p.notice);
     onExecuteReschedule(
       p.bookingId,
       p.date,
@@ -442,7 +442,7 @@ export default function StudentDetailView({
                   <span className="font-mono font-bold text-slate-800 text-sm">{formatDateWithDay(b.date)} {formatTimeStr(b.startHour, b.startMin)}</span>
                   <span className="ml-2 text-xs text-slate-500 font-sans">{b.roomType === 'large' ? '大教室' : '小教室'} ({b.lessonType})</span>
                 </div>
-                <div className="flex gap-1.5">
+                <div className="flex gap-1.5 shrink-0 whitespace-nowrap">
                   <button onClick={() => openRescheduleModal(b)} className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold transition">變更</button>
                   <button onClick={() => setSignModalId({ id: b.id, studentName: student.name })} className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-xl font-bold transition shadow-xs">{getSignatureWindowStatus(b, now) === 'late_over_1h' ? '補簽' : '簽名'}</button>
                 </div>

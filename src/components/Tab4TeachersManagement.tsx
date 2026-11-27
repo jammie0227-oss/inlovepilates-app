@@ -4,7 +4,7 @@ import React, { useState, useMemo } from 'react';
 import { Users, FileSpreadsheet, ChevronDown, ChevronUp, Mail, ArrowLeft, Edit3, X, UserPlus, Check, Lock } from 'lucide-react';
 import { BookingStatusBadge } from './SignatureModals';
 import { PRESET_COLORS, formatTimeStr, formatDateWithDay } from '../mockData';
-import { deriveMonthKeys, deriveTeacherMonthKeys, formatMonthKey, getTeacherStats as computeTeacherStats, monthKeyOf, REVIEW_TAG } from '../utils/bookingRules';
+import { deriveMonthKeys, deriveTeacherMonthKeys, formatMonthKey, getTeacherStats as computeTeacherStats, monthKeyOf, compareByStart, REVIEW_TAG } from '../utils/bookingRules';
 import type { TeacherMonthStats } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
 import { useNow } from '../utils/useToday';
@@ -111,7 +111,7 @@ export default function Tab4TeachersManagement({
   const filteredBookings = bookings.filter((b: any) => {
     const isTarget = userRole === 'admin' || b.teacherId === currentUserId;
     return isTarget && monthKeyOf(b.date) === selectedMonth;
-  });
+  }).sort(compareByStart);
 
   // 老師與管理員共用同一個統計口徑（bookingRules.getTeacherStats）
   const getTeacherStats = (tId: string, monthKey: string = selectedMonth) =>
@@ -202,7 +202,7 @@ export default function Tab4TeachersManagement({
                 <th className="py-2.5 px-1 text-left font-sans">{isAdmin ? '老師' : '月份'}</th>
                 <th className="py-2.5 px-1">1v1</th>
                 <th className="py-2.5 px-1">1v2</th>
-                <th className="py-2.5 px-1 font-black text-slate-900">總堂數</th>
+                <th className="py-2.5 px-1 font-black text-slate-900 whitespace-nowrap">總堂數</th>
                 <th className="py-2.5 px-1">未結堂數</th>
                 <th className="py-2.5 px-1">預排堂數</th>
                 {isAdmin && <th className="py-2.5 px-1">取消堂數</th>}
@@ -569,7 +569,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
   const now = useNow();
   const historyStats = useMemo(() => monthKeys.map(k => {
     const st = computeTeacherStats(bookings, k, teacher.id, now);
-    return { month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, unsettled: st.unsettled, upcoming: st.upcoming, late: st.lateCancel, normal: st.normalCancel };
+    return { isCurrent: k === currentMonthKey, month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, unsettled: st.unsettled, upcoming: st.upcoming, late: st.lateCancel, normal: st.normalCancel };
   }), [bookings, monthKeys, teacher.id, currentMonthKey, now]);
 
   return (
@@ -642,7 +642,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
             {historyStats.slice(0, expandStats ? historyStats.length : 5).map((s, idx) => (
-              <tr key={idx} className={idx === 0 ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
+              <tr key={idx} className={s.isCurrent ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
                 <td className="py-2.5 text-left font-bold font-sans text-slate-900">{s.month}</td>
                 <td className="py-2.5">{s.v1}</td>
                 <td className="py-2.5">{s.v2}</td>

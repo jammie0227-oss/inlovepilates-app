@@ -21,8 +21,6 @@ export interface BookingEditConfirmPayload {
   roomType: 'large' | 'small';
   lessonType: '1v1' | '1v2';
   isCancel: boolean;
-  /** 系統自動調整教室 / 大教室讓位時的提示 */
-  notice?: string;
   /** 需同步自動移至小教室的既有 1v1 課堂（改期搶大教室時的讓位） */
   autoSwaps?: AutoSwapItem[];
 }
@@ -103,7 +101,6 @@ export default function BookingEditModal({
   const handleConfirm = (isCancel: boolean) => {
     if (!isCancel && isUnchanged) return;
     let finalRoom = room;
-    let notice: string | undefined;
     let autoSwaps: AutoSwapItem[] | undefined;
 
     if (!isCancel) {
@@ -140,8 +137,16 @@ export default function BookingEditModal({
         return;
       }
       finalRoom = res.booking.roomType;
-      notice = res.notices[0];
+      const notice = res.notices[0];
       autoSwaps = res.autoSwaps.length ? res.autoSwaps : undefined;
+
+      // 系統把教室導回原值後與原課堂完全相同：不視為異動，不寫入改期紀錄 / 通知
+      if (timeUnchanged && finalRoom === booking.roomType && lessonType === booking.lessonType) {
+        systemAlert(`【課堂未變更】\n${notice ? `${notice}。\n` : ''}調整後的結果與原課堂相同，未做任何變更。`);
+        return;
+      }
+      // 無讓位的教室導正改用彈窗提示（toast 會立刻被「改期完成」覆蓋）；讓位結果由完成提示說明
+      if (notice && !autoSwaps) systemAlert(`【教室調度】\n${notice}`);
     }
 
     onConfirm({
@@ -152,7 +157,6 @@ export default function BookingEditModal({
       roomType: finalRoom,
       lessonType,
       isCancel,
-      notice,
       autoSwaps,
     });
   };
