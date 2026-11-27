@@ -86,10 +86,13 @@ export default function StudentDetailView({
   const handleSaveRules = () => {
     if (!ruleDraft) return;
     const rules = ruleDraft.noRegularRule ? [] : ruleDraft.rules;
+    // 兩個課程類別欄位一起更新，新增預約彈窗的預設值才會跟著排課規則
+    const lessonType = rules[0]?.lessonType || student.defaultLessonType || '1v1';
     onUpdateStudent({
       id: student.id,
       rules,
-      defaultLessonType: rules[0]?.lessonType || student.defaultLessonType || '1v1',
+      defaultLessonType: lessonType,
+      lessonType,
       noRegularRule: ruleDraft.noRegularRule,
       autoRescheduleOnCancel: ruleDraft.autoRescheduleOnCancel,
     });
@@ -178,16 +181,17 @@ export default function StudentDetailView({
       targetCount: mode === 'append_remaining' ? stats.availableToSchedule : stats.replaceTotal
     });
 
-    if (result.success) {
+    // 一堂都排不進時不套用，避免「全部重新排課」只清掉既有預排
+    if (result.success && result.newRecords.length > 0) {
       // 依據引擎判斷，保留安全保護區（已簽到、已逾期、已取消），僅替換或追加純預約
       const cleanBookings = bookings.filter((b: any) => !result.removedBookingIds.includes(b.id));
-      onAddBookings(result.newRecords, cleanBookings, mode);
+      onAddBookings(result.newRecords, cleanBookings, mode, result.autoSwaps);
       setAutoScheduleOpen(false);
       setScheduleResultModal(result);
 
       // 未排入提醒已直接顯示於「排課完成確認」彈窗內
     } else {
-      systemAlert(result.message || '無符合規則之課堂可排入');
+      systemAlert(result.success ? '沒有任何可排入的時段，原有預排維持不變。' : result.message || '無符合規則之課堂可排入');
     }
   };
 
@@ -720,6 +724,12 @@ export default function StudentDetailView({
                 <ul className="max-h-28 overflow-y-auto space-y-0.5 list-disc pl-4 text-[11px] font-medium">
                   {scheduleResultModal.skippedReasons.map((r, i) => <li key={i}>{r}</li>)}
                 </ul>
+              </div>
+            )}
+
+            {(scheduleResultModal.autoSwaps?.length ?? 0) > 0 && (
+              <div className="p-2.5 bg-sky-50 border border-sky-200 rounded-xl text-sky-900 font-bold leading-snug">
+                ℹ️ 教室調度：原大教室 {scheduleResultModal.autoSwaps!.length} 堂 1v1 已自動移至小教室，並通知原任課老師
               </div>
             )}
 

@@ -36,7 +36,7 @@ export default function Tab1StudioCalendar({
   students: StudentItem[]; 
   bookings: BookingItem[]; 
   showToast: (msg: string) => void; 
-  onSelectStudent: (name: string) => void;
+  onSelectStudent: (studentId: string) => void;
   viewMode?: 'day' | 'week';
   setViewMode?: (mode: 'day' | 'week') => void;
   openGlobalBooking: (preset?: any) => void;
@@ -65,7 +65,7 @@ export default function Tab1StudioCalendar({
   const adminEditor = useBookingEditor(onExecuteReschedule);
   const handleCardClick = (b: BookingItem, isMyStudentCard: boolean) => {
     if (isMyStudentCard) {
-      onSelectStudent(b.studentName || '');
+      onSelectStudent(b.studentId);
       return;
     }
     if (userRole !== 'admin') return;
@@ -170,7 +170,8 @@ export default function Tab1StudioCalendar({
   }, [bookings, view, currentStr, weekDays]);
 
   const handleQuickBook = async (h: number, m: string, room: string, date: string) => {
-    if (myStudents.length === 0) return systemAlert('您名下目前無有效學員，無法進行預約');
+    // 管理員可在彈窗內改選授課老師代排，名下沒有學員也要能開啟
+    if (userRole !== 'admin' && myStudents.length === 0) return systemAlert('您名下目前無有效學員，無法進行預約');
 
     const targetStudent = myStudents[0];
     const preset = getStudentBookingPreset(targetStudent, currentUserId);
@@ -179,7 +180,7 @@ export default function Tab1StudioCalendar({
       hour: String(h), 
       minute: m, 
       roomType: room as any, 
-      studentName: targetStudent.name, 
+      studentId: targetStudent?.id, 
       lessonType: preset.lessonType 
     });
   };

@@ -121,7 +121,10 @@ export const checkGlobalConflict = ({
     }
 
     // 學員分身衝堂
-    const isSameStudent = (studentId && b.studentId === studentId) || (studentName && b.studentName === studentName);
+    // 雙方都有 ID 時只比 ID（同名不同人不算衝堂），缺 ID 才退回姓名
+    const isSameStudent = studentId && b.studentId
+      ? b.studentId === studentId
+      : !!studentName && b.studentName === studentName;
     if (isSameStudent) {
       return {
         hasConflict: true,

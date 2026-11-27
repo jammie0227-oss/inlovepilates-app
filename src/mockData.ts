@@ -7,15 +7,19 @@ import type {
 export * from './types';
 import { checkGlobalConflict, isCancelledSlot } from './utils/conflict';
 import {
+  applyAutoSwaps,
   calculateStudentStats,
   diffDays,
   findOtherPriorityOwner,
   formatTimestamp,
+  getDefaultRoomForSchedule,
   hoursUntilLesson,
   matchesStudent,
   needsPriorityReview,
   occupiesQuota,
+  resolveRoomAssignment,
 } from './utils/bookingRules';
+import type { AutoSwapItem } from './utils/bookingRules';
 export { checkGlobalConflict, isCancelledSlot };
 
 // ==========================================
@@ -119,6 +123,51 @@ export class ScheduleEngine {
     if (userRole !== 'admin' && diffDays(dateStr, todayStr) > 90) return '超過 90 天預約上限';
     if (this.hasStarted(dateStr, h, m)) return '已超過開課時間';
     return null;
+  }
+
+  /**
+   * 自動排課與順延補排共用的落位判斷，與手動新增預約同一套規則：
+   * 教室調度（含大教室讓位）→ 全局衝堂。1v1 撞教室而另一間有空時直接改排另一間。
+   * 可排回傳最終教室與需移至小教室的既有 1v1；不可排回傳原因。
+   */
+  private placeSlot({
+    existingBookings, dateStr, h, m, lessonType, requestedRoom, teacherId, sid, sName, userRole,
+  }: {
+    existingBookings: BookingItem[];
+    dateStr: string;
+    h: number;
+    m: number;
+    lessonType: '1v1' | '1v2';
+    requestedRoom: 'large' | 'small';
+    teacherId: string;
+    sid: string;
+    sName: string;
+    userRole: 'admin' | 'teacher';
+  }):
+    | { ok: true; roomType: 'large' | 'small'; autoSwaps: AutoSwapItem[] }
+    | { ok: false; reason: string } {
+    const assignment = resolveRoomAssignment({
+      dateStr, startHour: h, startMin: m, lessonType, requestedRoom, existingBookings,
+    });
+    if (assignment.blocked) return { ok: false, reason: assignment.notice || '大教室空間不足，無法預約 1v2' };
+
+    const autoSwaps = assignment.autoSwaps ?? [];
+    const effective = applyAutoSwaps(existingBookings, autoSwaps);
+    const checkRoom = (roomType: 'large' | 'small') => checkGlobalConflict({
+      dateStr, startHour: h, startMin: m, durationMins: 50,
+      roomType, lessonType, teacherId, studentId: sid, studentName: sName, userRole,
+      existingBookings: effective, teachersMap: this.teachersMap, studentsMap: this.studentsMap,
+    });
+
+    let roomType = assignment.roomType;
+    let conflict = checkRoom(roomType);
+    if (conflict.hasConflict && conflict.suggestAlternateRoom && lessonType === '1v1') {
+      roomType = conflict.suggestAlternateRoom;
+      conflict = checkRoom(roomType);
+    }
+    return conflict.hasConflict
+      ? { ok: false, reason: conflict.reason || '該時段已有預約' }
+      : { ok: true, roomType, autoSwaps };
   }
 
   /** 依「最終教室」決定排入狀態：他人優先時段（>= 14 天）→ 一般老師待審 */
@@ -241,8 +290,9 @@ export class ScheduleEngine {
       };
     }
 
-    // 排除被移除的預約後的活躍課表
-    const activeBookings = this.bookings.filter(b => !removedBookingIds.includes(b.id));
+    // 排除被移除的預約後的活躍課表；隨排入進度累加新課堂並套用讓位結果
+    let activeBookings = this.bookings.filter(b => !removedBookingIds.includes(b.id));
+    const autoSwaps: AutoSwapItem[] = [];
     const dayNameToNum: Record<string, number> = { '日': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6 };
     const newRecords: BookingItem[] = [];
     const skippedReasons: string[] = [];
@@ -257,16 +307,17 @@ export class ScheduleEngine {
 
     while (remainingToSchedule > 0 && weeksCount < effectiveMaxWeeks) {
       weeksCount++;
-      for (const slot of validSlots) {
+      // 本週各時段依實際日期時間由早到晚處理（與規則列的排列順序無關）
+      const weekSlots = validSlots
+        .map(slot => {
+          const matchDate = new Date(currentCursor);
+          matchDate.setDate(matchDate.getDate() + (dayNameToNum[slot.day] - matchDate.getDay() + 7) % 7);
+          return { slot, dateStr: formatLocalDate(matchDate) };
+        })
+        .sort((a, b) => a.dateStr.localeCompare(b.dateStr) || a.slot.time.localeCompare(b.slot.time));
+
+      for (const { slot, dateStr } of weekSlots) {
         if (remainingToSchedule <= 0) break;
-
-        const targetDayNum = dayNameToNum[slot.day];
-        const matchDate = new Date(currentCursor);
-        const curDay = matchDate.getDay();
-        const diff = (targetDayNum - curDay + 7) % 7;
-        matchDate.setDate(matchDate.getDate() + diff);
-
-        const dateStr = formatLocalDate(matchDate);
         if (dateStr < effectiveStartDate) continue;
         if (slot.startDate && dateStr < slot.startDate) continue;
 
@@ -277,7 +328,7 @@ export class ScheduleEngine {
         const h = parseInt(hStr, 10);
         const m = parseInt(mStr, 10);
         const lType = slot.lessonType || '1v1';
-        let rType = slot.roomType || (lType === '1v2' ? 'large' : 'small');
+        let rType = slot.roomType || getDefaultRoomForSchedule(teacherId, lType);
         if (lType === '1v2') rType = 'large'; // 小教室嚴禁排入 1v2
 
         // 3.5 自動跳過：超過 90 天（管理員不受限）、已開課；他人優先時段不跳過，改依角色排入或送審
@@ -294,70 +345,44 @@ export class ScheduleEngine {
           continue;
         }
 
-        // 4. 狀況 E 檢驗：被取消的時段已完全釋出，可正常預排
-        const conflict = checkGlobalConflict({
-          dateStr,
+        // 4. 教室調度（含大教室讓位）與衝堂檢測；被取消的時段已完全釋出，可正常預排
+        const placed = this.placeSlot({
+          existingBookings: activeBookings,
+          dateStr, h, m, lessonType: lType, requestedRoom: rType, teacherId, sid, sName, userRole,
+        });
+        if (!placed.ok) {
+          skippedReasons.push(`${formatDateWithDay(dateStr)} ${slot.time} (${placed.reason})`);
+          continue;
+        }
+
+        const record: BookingItem = {
+          id: genId('b-auto'),
+          date: dateStr,
           startHour: h,
           startMin: m,
           durationMins: 50,
-          roomType: rType,
-          lessonType: lType,
           teacherId,
-          studentId: sid,
           studentName: sName,
-          userRole,
-          existingBookings: [...activeBookings, ...newRecords],
-          teachersMap: this.teachersMap,
-          studentsMap: this.studentsMap
-        });
+          studentId: sid,
+          roomType: placed.roomType,
+          lessonType: lType,
+          status: this.getStatus({ ...statusInput, roomType: placed.roomType }),
+          signed: false,
+          isAuto: true
+        };
+        newRecords.push(record);
+        autoSwaps.push(...placed.autoSwaps);
+        activeBookings = [...applyAutoSwaps(activeBookings, placed.autoSwaps), record];
+        remainingToSchedule--;
 
-        if (!conflict.hasConflict) {
-          newRecords.push({
-            id: genId('b-auto'),
+        if (placed.roomType !== rType) {
+          const roomName = (r: 'large' | 'small') => (r === 'large' ? '大教室' : '小教室');
+          suggestedRoomSwaps.push({
             date: dateStr,
-            startHour: h,
-            startMin: m,
-            durationMins: 50,
-            teacherId,
-            studentName: sName,
-            studentId: sid,
-            roomType: rType,
-            lessonType: lType,
-            status: this.getStatus({ ...statusInput, roomType: rType }),
-            signed: false,
-            isAuto: true
+            time: slot.time,
+            targetRoom: placed.roomType,
+            reason: `${roomName(rType)}已有預約，已自動改排至${roomName(placed.roomType)}`
           });
-          remainingToSchedule--;
-        } else {
-          // 若衝堂但另一間教室有空（且符合 1v1 換室條件）：直接改排至另一間教室
-          if (conflict.suggestAlternateRoom && lType === '1v1') {
-            const altRoom = conflict.suggestAlternateRoom;
-            const altConflict = checkGlobalConflict({
-              dateStr, startHour: h, startMin: m, durationMins: 50,
-              roomType: altRoom, lessonType: lType, teacherId,
-              studentId: sid, studentName: sName, userRole,
-              existingBookings: [...activeBookings, ...newRecords],
-              teachersMap: this.teachersMap, studentsMap: this.studentsMap
-            });
-            if (!altConflict.hasConflict) {
-              newRecords.push({
-                id: genId('b-auto'),
-                date: dateStr, startHour: h, startMin: m, durationMins: 50,
-                teacherId, studentName: sName, studentId: sid,
-                roomType: altRoom, lessonType: lType,
-                status: this.getStatus({ ...statusInput, roomType: altRoom }), signed: false, isAuto: true
-              });
-              remainingToSchedule--;
-              suggestedRoomSwaps.push({
-                date: dateStr,
-                time: slot.time,
-                targetRoom: altRoom,
-                reason: `${rType === 'large' ? '大教室' : '小教室'}已有預約，已自動改排至${altRoom === 'large' ? '大教室' : '小教室'}`
-              });
-              continue;
-            }
-          }
-          skippedReasons.push(`${formatDateWithDay(dateStr)} ${slot.time} (${conflict.reason})`);
         }
       }
       if (hitHorizonLimit) break;
@@ -388,6 +413,7 @@ export class ScheduleEngine {
       newRecords,
       removedBookingIds,
       skippedReasons,
+      autoSwaps,
       suggestedRoomSwaps
     };
   }
@@ -436,7 +462,7 @@ export class ScheduleEngine {
     currentBookings: BookingItem[];
     priorityGrid?: PriorityGrid;
     userRole?: 'admin' | 'teacher';
-  }): { postponedBooking: BookingItem | null; alertMsg?: string } {
+  }): { postponedBooking: BookingItem | null; autoSwaps?: AutoSwapItem[]; alertMsg?: string } {
     // 一般老師：3 個月 (90天) 上限（自今天起算）；管理員不受限（僅設一年搜尋視窗避免無窮迴圈，見下方 searchStartDate）
     const limitDate = parseLocalDate(todayStr);
     limitDate.setDate(limitDate.getDate() + 90);
@@ -457,7 +483,8 @@ export class ScheduleEngine {
       limitDate.setDate(limitDate.getDate() + 366);
     }
 
-    const validSlots = slots.filter(s => s.freq !== '不固定');
+    // 同一天有多個時段時取較早者
+    const validSlots = slots.filter(s => s.freq !== '不固定').sort((a, b) => a.time.localeCompare(b.time));
     if (validSlots.length === 0) return { postponedBooking: null };
 
     const dayNameToNum: Record<string, number> = { '日': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6 };
@@ -472,46 +499,37 @@ export class ScheduleEngine {
         const [h, m] = slot.time.split(':').map(Number);
         const lType = slot.lessonType || '1v1';
         // 小教室嚴禁排入 1v2
-        const rType = lType === '1v2' ? 'large' : slot.roomType || 'small';
+        const rType = lType === '1v2' ? 'large' : slot.roomType || getDefaultRoomForSchedule(teacherId, lType);
 
         // 他人優先時段仍可排入：一般老師 14 天前待審，其餘直接生效
         if (this.getSlotSkipReason(dateStr, h, m, todayStr, userRole)) continue;
 
-        const conflict = checkGlobalConflict({
-          dateStr,
-          startHour: h,
-          startMin: m,
-          durationMins: 50,
-          roomType: rType,
-          lessonType: lType,
-          teacherId,
-          studentId: sid,
+        const placed = this.placeSlot({
           existingBookings: currentBookings,
-          teachersMap: this.teachersMap,
-          studentsMap: this.studentsMap
+          dateStr, h, m, lessonType: lType, requestedRoom: rType, teacherId, sid, sName, userRole,
         });
+        if (!placed.ok) continue;
 
-        if (!conflict.hasConflict) {
-          return {
-            postponedBooking: {
-              id: genId('b-auto-postpone'),
-              date: dateStr,
-              startHour: h,
-              startMin: m,
-              durationMins: 50,
-              teacherId,
-              studentName: sName,
-              studentId: sid,
-              roomType: rType,
-              lessonType: lType,
-              status: this.getStatus({
-                dateStr, h, m, teacherId, userRole, todayStr, priorityGrid, roomType: rType,
-              }),
-              signed: false,
-              isAuto: true
-            }
-          };
-        }
+        return {
+          postponedBooking: {
+            id: genId('b-auto-postpone'),
+            date: dateStr,
+            startHour: h,
+            startMin: m,
+            durationMins: 50,
+            teacherId,
+            studentName: sName,
+            studentId: sid,
+            roomType: placed.roomType,
+            lessonType: lType,
+            status: this.getStatus({
+              dateStr, h, m, teacherId, userRole, todayStr, priorityGrid, roomType: placed.roomType,
+            }),
+            signed: false,
+            isAuto: true
+          },
+          autoSwaps: placed.autoSwaps
+        };
       }
       cursor.setDate(cursor.getDate() + 1);
     }

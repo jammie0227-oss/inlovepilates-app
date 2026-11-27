@@ -310,6 +310,10 @@ export const canRelocateToSmall = (
   });
 };
 
+/** 可被讓位移出大教室的既有課堂：有效、未簽、尚未開課的 1v1 */
+export const isYieldableLesson = (b: BookingItem, now: Date = new Date()): boolean =>
+  b.lessonType === '1v1' && isActionableBooking(b) && isFutureLesson(b.date, b.startHour, b.startMin, now);
+
 /** 套用大教室讓位結果：被移課堂改為小教室（供衝堂檢測與寫入使用） */
 export const applyAutoSwaps = (bookings: BookingItem[], swaps: AutoSwapItem[]): BookingItem[] => {
   if (swaps.length === 0) return bookings;
@@ -370,10 +374,10 @@ export const resolveRoomAssignment = ({
     };
   }
 
-  // 大教室智慧讓位：所有重疊課堂都是「有效、未簽」的 1v1，且每一堂都能以自己完整 50 分鐘區間
+  // 大教室智慧讓位：所有重疊課堂都是「有效、未簽、尚未開課」的 1v1，且每一堂都能以自己完整 50 分鐘區間
   // 搬進小教室（小教室、任課老師、學員皆無衝堂）。任何一堂不行就整體放棄讓位（不可局部移動）。
   const yieldable =
-    largeBusy.every(b => b.lessonType === '1v1' && b.status === 'confirmed' && !b.signed) &&
+    largeBusy.every(b => isYieldableLesson(b)) &&
     largeBusy.every(b => canRelocateToSmall(b, existingBookings, excludeBookingId));
   if (yieldable) {
     const autoSwaps: AutoSwapItem[] = largeBusy.map(moved => ({
@@ -698,13 +702,14 @@ export const validateAndBuildBooking = ({
   } else {
     // 僅改教室：不可藉由換教室繞過他人優先時段送審
     const original = bookings.find(b => b.id === excludeBookingId);
-    const owner = original && original.roomType !== finalRoom
-      ? findOtherPriorityOwner({
-          dateStr: input.date, startHour: input.startHour, startMin: input.startMin,
-          durationMins: duration, roomType: finalRoom, teacherId: input.teacherId, priorityGrid,
-        })
-      : undefined;
-    if (needsPriorityReview({ dateStr: input.date, today, userRole, priorityOwnerId: owner })) {
+    const ownerOf = (roomType: RoomType) => findOtherPriorityOwner({
+      dateStr: input.date, startHour: input.startHour, startMin: input.startMin,
+      durationMins: duration, roomType, teacherId: input.teacherId, priorityGrid,
+    });
+    const owner = original && original.roomType !== finalRoom ? ownerOf(finalRoom) : undefined;
+    // 原教室已屬同一位老師的優先時段（如「不限教室」）者，換教室不算改入
+    const movesIn = !!original && !!owner && ownerOf(original.roomType) !== owner;
+    if (movesIn && needsPriorityReview({ dateStr: input.date, today, userRole, priorityOwnerId: owner })) {
       return fail('改至他人優先時段（14 天前）的教室需由管理員處理，請聯絡管理員或另行新增預約送審', 'time');
     }
   }
@@ -1082,20 +1087,26 @@ export const getBookingOutcome = (
 type TimeFieldSource = Parameters<typeof getBookingOutcome>[0] &
   Pick<BookingItem, 'signedAt' | 'systemSignedAt' | 'cancelledAt' | 'systemCancelledAt'>;
 
-/** 處理時間欄：簽到 / 補簽 / 代簽 / 取消時間；尚未簽到且未取消的課堂回傳 null */
-export const getProcessedInfo = (b: TimeFieldSource): { label: string; time: string } | null => {
+/** 處理時間的原始值（完整操作時間）；尚未簽到且未取消的課堂回傳 null */
+export const getProcessedStamp = (b: TimeFieldSource): { label: string; stamp?: string } | null => {
   switch (getBookingOutcome(b)) {
     case null:
       return null;
     case 'signed':
-      return { label: '簽到時間', time: formatShortStamp(b.signedAt) };
+      return { label: '簽到時間', stamp: b.signedAt };
     case 'makeup_signed':
-      return { label: '補簽時間', time: formatShortStamp(b.signedAt) };
+      return { label: '補簽時間', stamp: b.signedAt };
     case 'system_signed':
-      return { label: '代簽時間', time: formatShortStamp(b.systemSignedAt || b.signedAt) };
+      return { label: '代簽時間', stamp: b.systemSignedAt || b.signedAt };
     default:
-      return { label: '取消時間', time: formatShortStamp(b.systemCancelledAt || b.cancelledAt) };
+      return { label: '取消時間', stamp: b.systemCancelledAt || b.cancelledAt };
   }
+};
+
+/** 處理時間欄：簽到 / 補簽 / 代簽 / 取消時間（MM/DD HH:mm） */
+export const getProcessedInfo = (b: TimeFieldSource): { label: string; time: string } | null => {
+  const info = getProcessedStamp(b);
+  return info && { label: info.label, time: formatShortStamp(info.stamp) };
 };
 
 /** 改期歷程：異動時間｜原定：（[原教室色點] 原MM/DD HH:mm）；色點標記由 NoticeText 渲染 */

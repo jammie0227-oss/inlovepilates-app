@@ -3,6 +3,7 @@ import React, { useState, useMemo } from 'react';
 import { Bell, Download, CheckCheck, RotateCcw, ChevronDown, ChevronUp, BookOpen, Edit3, Calendar, X, Lock } from 'lucide-react';
 import { formatDateWithDay, formatTimeStr } from '../mockData';
 import { formatTimestamp, getLogSeverity, isLogReadBy, isLogVisibleTo, isPendingApproval, setLogReadBy, noticeToPlainText, REVIEW_TAG, ROOM_NAME } from '../utils/bookingRules';
+import { downloadCsv, toCsv } from '../utils/csv';
 import { NoticeText, RoomDot } from './RoomDot';
 
 export default function Tab5RulesAndAudit({ 
@@ -113,23 +114,19 @@ export default function Tab5RulesAndAudit({
 
     if (logsToExport.length === 0) return showToast('該範圍內無資料可匯出');
 
-    let csv = "時間,類別,老師,學生,剩餘堂數,詳細內容\n";
-    logsToExport.forEach((l: any) => { 
+    const rows = logsToExport.map((l: any) => {
       const { teacherClean, studentClean } = getCleanNames(l);
-      const rem = l.remainingCredits !== undefined ? l.remainingCredits : '';
       const detail = noticeToPlainText(
         [l.title, l.detail || l.action, l.revokedAt ? `已撤銷（${l.revokedAt}）` : ''].filter(Boolean).join('\n')
       );
-      csv += `${l.time},${l.typeStr},${teacherClean},${studentClean},${rem},"${detail.replace(/"/g, '""')}"\n`; 
+      return [l.time, l.typeStr, teacherClean, studentClean, l.remainingCredits, detail];
     });
-    
-    const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); 
-    a.href = url; 
-    a.download = `InLovePilates_AuditLogs_${type === 'month' ? 'CurrentMonth' : 'All'}_${Date.now()}.csv`; 
-    a.click();
-    
+
+    downloadCsv(
+      `InLovePilates_AuditLogs_${type === 'month' ? 'CurrentMonth' : 'All'}_${Date.now()}.csv`,
+      toCsv([['時間', '類別', '老師', '學生', '剩餘堂數', '詳細內容'], ...rows]),
+    );
+
     setExportMenuOpen(false);
     showToast(`已匯出 ${type === 'month' ? '當月' : '全部'} 系統復盤報表 (CSV)`);
   };

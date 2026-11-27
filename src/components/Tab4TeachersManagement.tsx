@@ -6,7 +6,10 @@ import { BookingStatusBadge } from './SignatureModals';
 import { PRESET_COLORS, formatTimeStr, formatDateWithDay } from '../mockData';
 import { deriveMonthKeys, deriveTeacherMonthKeys, formatMonthKey, calculateTeacherMonthlyStats, sumTeacherMonthStats, filterMonthBookings, monthKeyOf, compareByStart, REVIEW_TAG } from '../utils/bookingRules';
 import type { TeacherMonthStats } from '../utils/bookingRules';
+import type { TeacherProfile } from '../types';
 import { systemAlert } from '../utils/systemAlert';
+import { downloadCsv } from '../utils/csv';
+import { buildTeacherStatsCsv } from '../utils/teacherStatsCsv';
 import { useNow } from '../utils/useToday';
 
 /** 授課統計表的數值欄（管理員老師列、一般老師月份列與合計列共用） */
@@ -123,6 +126,22 @@ export default function Tab4TeachersManagement({
         .map(k => ({ key: k, stats: statsFor(currentUserId, k) }));
   const myTotals = sumTeacherMonthStats(myMonthRows.map(r => r.stats));
   const archivedTeachers = Object.values(teachers).filter((t: any) => !t.isActive);
+  // 管理員統計表：在職老師，加上當月仍有課堂的已封存老師（堂數不可因封存而消失）
+  const statTeachers = (Object.values(teachers) as TeacherProfile[]).filter(
+    t => t.isActive || filterMonthBookings(bookings, selectedMonth, t.id).length > 0,
+  );
+
+  // 匯出目前查詢月份的對帳 CSV：一般老師僅自己的資料，管理員為全館
+  const handleExport = () => {
+    const rows = isAdmin
+      ? statTeachers.map(t => ({ label: t.isActive ? t.name : `${t.name}（已封存）`, stats: statsFor(t.id) }))
+      : myMonthRows.map(r => ({ label: r.key.replace('-', '/'), stats: r.stats }));
+    downloadCsv(
+      `授課統計對帳_${selectedMonth}.csv`,
+      buildTeacherStatsCsv({ isAdmin, monthKey: selectedMonth, rows, bookings, teachers, currentUserId, now }),
+    );
+    showToast(`已匯出 ${formatMonthKey(selectedMonth)} 統計表 CSV`);
+  };
 
   // 儲存新增老師
   const handleSaveTeacher = () => {
@@ -177,7 +196,7 @@ export default function Tab4TeachersManagement({
               {monthKeys.map(k => <option key={k} value={k}>{formatMonthKey(k)}</option>)}
             </select>
           </div>
-          <button onClick={() => showToast(`已匯出 ${formatMonthKey(selectedMonth)} 統計表 CSV`)} className="text-xs bg-slate-800 hover:bg-slate-700 transition text-white px-3 py-1.5 rounded-xl font-bold shadow-xs flex items-center gap-1">
+          <button onClick={handleExport} className="text-xs bg-slate-800 hover:bg-slate-700 transition text-white px-3 py-1.5 rounded-xl font-bold shadow-xs flex items-center gap-1">
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" /> 匯出
           </button>
         </div>
@@ -208,7 +227,7 @@ export default function Tab4TeachersManagement({
                   <StatCells s={myTotals} />
                 </tr>
               )}
-              {isAdmin && activeTeachers.map((t: any) => {
+              {isAdmin && statTeachers.map((t: any) => {
                 const s = statsFor(t.id);
                 return (
                   <tr key={t.id} className="hover:bg-slate-50 transition">
@@ -217,6 +236,7 @@ export default function Tab4TeachersManagement({
                       <div className="flex items-center gap-1.5">
                         <span className={`w-2.5 h-2.5 rounded-full ${t.color} shrink-0 shadow-2xs`} />
                         <span className={`font-black ${t.text}`}>{t.name}</span>
+                        {!t.isActive && <span className="text-[9px] text-slate-400 font-bold">已封存</span>}
                       </div>
                     </td>
                     <StatCells s={s} />
@@ -555,6 +575,9 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
     [bookings, monthKeys, teacher.id, now],
   );
 
+  // 收合時至少列到當月（未來月份較多時，當月仍看得到）
+  const collapsedCount = Math.max(5, historyStats.findIndex(h => h.key === currentMonthKey) + 1);
+
   return (
     <div className="space-y-4 animate-in fade-in slide-in-from-right-4 pb-20">
       <div className="flex items-center gap-2 border-b border-slate-200 pb-2.5">
@@ -601,7 +624,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
         )}
         
         <div className="pt-2 border-t border-slate-100">
-          <button onClick={() => showToast(teacher.email ? `已發送系統開通邀請信至 ${teacher.email}` : '尚未填寫 Email，請先編輯資料後再寄送')} className="w-full bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 py-2.5 rounded-xl font-bold flex items-center justify-center gap-1 transition shadow-2xs">
+          <button onClick={() => showToast(teacher.email ? '已記錄老師資料，將於 Supabase Auth 串接後啟用信件開通' : '尚未填寫 Email，請先編輯資料後再寄送')} className="w-full bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 py-2.5 rounded-xl font-bold flex items-center justify-center gap-1 transition shadow-2xs">
             <Mail className="w-4 h-4" /> 寄送邀請信
           </button>
         </div>
@@ -624,7 +647,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
-            {historyStats.slice(0, expandStats ? historyStats.length : 5).map(({ key, stats: s }) => {
+            {historyStats.slice(0, expandStats ? historyStats.length : collapsedCount).map(({ key, stats: s }) => {
               const isCurrent = key === currentMonthKey;
               return (
                 <tr key={key} className={isCurrent ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
@@ -638,7 +661,7 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
           </tbody>
         </table>
         </div>
-        {historyStats.length > 5 && (
+        {historyStats.length > collapsedCount && (
           <button onClick={() => setExpandStats(!expandStats)} className="w-full text-center py-2 text-slate-400 hover:text-slate-600 font-bold text-[11px] transition mt-1 bg-white border border-slate-100 rounded-xl shadow-2xs">
             {expandStats ? '收合紀錄 ▲' : '展開更早紀錄 ▼'}
           </button>

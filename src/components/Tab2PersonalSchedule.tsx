@@ -153,7 +153,7 @@ export default function Tab2PersonalSchedule({
   const overdueCountForDay = myOverdueBookings.filter((b: any) => b.date === currentStr).length;
   // 瀏覽日有逾期課堂、或逾期學員在瀏覽日另有排課時，自動展開提醒
   const autoExpandOverdue = overdueCountForDay > 0 || myOverdueBookings.some((ob: any) =>
-    upcomingBookingsForDay.some((ub: any) => ub.studentName === ob.studentName)
+    upcomingBookingsForDay.some((ub: any) => ub.studentId === ob.studentId)
   );
 
   const openSignModal = (b: any) => setActiveSignModal({ id: b.id, studentName: b.studentName || '學員' });
@@ -223,7 +223,7 @@ export default function Tab2PersonalSchedule({
         onSign={openSignModal}
         onEdit={editor.openEdit}
         onUpdateNote={onUpdateBookingNote}
-        onClickBooking={b => onSelectStudent(b.studentName)}
+        onClickBooking={b => onSelectStudent(b.studentId)}
       />
 
       {/* 日曆檢視 */}
@@ -243,7 +243,7 @@ export default function Tab2PersonalSchedule({
                   booking={b}
                   now={now}
                   showStudentName
-                  onClick={() => onSelectStudent(b.studentName)}
+                  onClick={() => onSelectStudent(b.studentId)}
                   onUpdateNote={onUpdateBookingNote}
                   onSign={openSignModal}
                   onEdit={editor.openEdit}
@@ -275,7 +275,7 @@ export default function Tab2PersonalSchedule({
                 booking={b}
                 now={now}
                 showStudentName
-                onClick={() => onSelectStudent(b.studentName)}
+                onClick={() => onSelectStudent(b.studentId)}
                 onUpdateNote={onUpdateBookingNote}
                 onZoomSignature={setZoomedImage}
               />
@@ -316,7 +316,7 @@ export default function Tab2PersonalSchedule({
                     return (
                       <div 
                         key={b.id} 
-                        onClick={() => onSelectStudent(b.studentName)} 
+                        onClick={() => onSelectStudent(b.studentId)} 
                         className={`text-[11px] truncate py-0.5 rounded shadow-2xs cursor-pointer hover:scale-[1.02] transition-transform ${tagLabel ? 'px-0.5' : 'px-px md:px-1.5'} ${getPersonalBookingStyle(b, 'month')}`}
                         title={`${b.studentName} (${b.roomType === 'large' ? '大教室' : '小教室'})${tagLabel ? `｜${tagLabel}` : ''}`}
                       >
@@ -382,7 +382,7 @@ export default function Tab2PersonalSchedule({
                     return (
                       <div
                         key={b.id}
-                        onClick={() => onSelectStudent(b.studentName)}
+                        onClick={() => onSelectStudent(b.studentId)}
                         title={tagLabel ? `${b.studentName}｜${tagLabel}` : undefined}
                         style={{ top: `${top}px`, height: `48px` }}
                         className={`absolute inset-x-0.5 z-10 rounded ${tagLabel ? 'p-px overflow-hidden' : 'px-px py-1 md:px-1'} flex flex-col justify-center cursor-pointer shadow-2xs select-none transition hover:scale-[1.02] ${getPersonalBookingStyle(b, 'week')}`}

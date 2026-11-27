@@ -2,6 +2,8 @@
 // 共用型別定義 (Single Source of Truth)
 // ==========================================
 
+import type { AutoSwapItem } from './utils/bookingRules';
+
 export interface TeacherProfile {
   id: string;
   name: string;
@@ -211,6 +213,8 @@ export interface ScheduleEngineResult {
   hitHorizonLimit?: boolean;
   /** 本次因他人優先時段而以 special_pending（待審）排入的堂數（管理員為 0） */
   nonPriorityCount?: number;
+  /** 為 1v2 讓位而需從大教室移至小教室的既有 1v1（套用排課結果時一併寫入並通知） */
+  autoSwaps?: AutoSwapItem[];
   suggestedRoomSwaps?: {
     date: string;
     time: string;

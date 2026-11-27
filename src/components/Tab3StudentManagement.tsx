@@ -63,7 +63,7 @@ export default function Tab3StudentManagement({
   const [trialDate, setTrialDate] = useState(todayStr);
   const [trialHour, setTrialHour] = useState('14');
   const [trialMin, setTrialMin] = useState('00');
-  const [trialRoom, setTrialRoom] = useState<'large' | 'small'>('small');
+  const [trialRoom, setTrialRoom] = useState<'large' | 'small'>(() => getDefaultRoomForSchedule(currentUserId, '1v1'));
   const [trialLessonType, setTrialLessonType] = useState<'1v1' | '1v2'>('1v1');
 
   // 正式學員排課設定：固定每週時段 / 無固定時間、各時段類別與教室、取消順延開關
@@ -94,8 +94,13 @@ export default function Tab3StudentManagement({
     const rows = list.map((s: any) => ({ ...s, stats: calculateStudentStats(bookings, s, now) }));
     const nextKey = ({ stats: { nextLesson: next } }: any) => next
       ? `${next.date} ${formatTimeStr(next.startHour, next.startMin)}`
-      : '9999';
+      : '';
     rows.sort((a: any, b: any) => {
+      // 依下堂課排序時，未排定者不論升降冪一律排在最後
+      if (sortField === 'next') {
+        const unscheduled = Number(!a.stats.nextLesson) - Number(!b.stats.nextLesson);
+        if (unscheduled !== 0) return unscheduled;
+      }
       const valA = sortField === 'name' ? a.name : nextKey(a);
       const valB = sortField === 'name' ? b.name : nextKey(b);
       return sortDesc ? valB.localeCompare(valA) : valA.localeCompare(valB);
@@ -113,7 +118,7 @@ export default function Tab3StudentManagement({
         startMin: parseInt(trialMin, 10),
         durationMins: 50,
         teacherId: currentUserId,
-        studentId: '',
+        studentId: 'trial-preview',
         studentName: newStudentName,
         roomType: trialRoom,
         lessonType: trialLessonType,
@@ -269,7 +274,7 @@ export default function Tab3StudentManagement({
         }
 
         if (result.newRecords.length > 0) {
-          onAddBookings(result.newRecords);
+          onAddBookings(result.newRecords, undefined, undefined, result.autoSwaps);
         }
 
         setScheduleModalResult(result);
@@ -286,6 +291,8 @@ export default function Tab3StudentManagement({
     setNewStudentPhone('');
     setNewStudentNote('');
     setSchedule(defaultSchedule());
+    setTrialLessonType('1v1');
+    setTrialRoom(getDefaultRoomForSchedule(currentUserId, '1v1'));
     setIsSubmitting(false);
     setIsCreateModalOpen(false);
   };
@@ -514,7 +521,10 @@ export default function Tab3StudentManagement({
                       <label className="font-bold text-slate-600 text-[10px]">課程種類</label>
                       <select
                         value={trialLessonType}
-                        onChange={(e: any) => setTrialLessonType(e.target.value)}
+                        onChange={(e: any) => {
+                          setTrialLessonType(e.target.value);
+                          setTrialRoom(getDefaultRoomForSchedule(currentUserId, e.target.value));
+                        }}
                         className="w-full border border-slate-200 rounded-lg p-1.5 bg-white font-bold outline-none"
                       >
                         <option value="1v1">1v1 單人</option>
@@ -588,6 +598,12 @@ export default function Tab3StudentManagement({
             {(scheduleModalResult.nonPriorityCount ?? 0) > 0 && (
               <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-800 font-bold leading-snug">
                 ⏳ 其中 {scheduleModalResult.nonPriorityCount} 堂為{REVIEW_TAG}，需經管理員核准，核准前標示為待審核。
+              </div>
+            )}
+
+            {(scheduleModalResult.autoSwaps?.length ?? 0) > 0 && (
+              <div className="p-2.5 bg-sky-50 border border-sky-200 rounded-xl text-sky-900 font-bold leading-snug">
+                ℹ️ 教室調度：原大教室 {scheduleModalResult.autoSwaps!.length} 堂 1v1 已自動移至小教室，並通知原任課老師
               </div>
             )}
 

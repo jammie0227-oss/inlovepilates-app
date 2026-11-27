@@ -6,11 +6,13 @@ import type { StudentItem, TeacherProfile } from '../types';
 import {
   BUSINESS_MINUTES,
   DAY_HOURS,
+  getDefaultRoomForSchedule,
   validateAndBuildBooking,
 } from '../utils/bookingRules';
 import type { AutoSwapItem, PriorityGrid } from '../utils/bookingRules';
 import BookingCheckCard from './BookingCheckCard';
 import CancelBookingModal from './CancelBookingModal';
+import { systemAlert } from '../utils/systemAlert';
 
 export interface BookingEditConfirmPayload {
   bookingId: string;
@@ -124,10 +126,10 @@ function BookingEditDialog({
     check.booking.roomType === booking.roomType && lessonType === booking.lessonType;
   const canChange = !!check?.ok && !hasNoEffect;
 
-  // 教室自動連動：切換課程類別時帶入預設教室（1v2 → 大、1v1 → 小）
+  // 教室自動連動：切換課程類別時依授課老師帶入預設教室
   const handleLessonTypeChange = (next: '1v1' | '1v2') => {
     setLessonType(next);
-    setRoom(next === '1v2' ? 'large' : 'small');
+    setRoom(getDefaultRoomForSchedule(booking.teacherId, next));
   };
 
   const handleConfirmChange = () => {
@@ -143,6 +145,9 @@ function BookingEditDialog({
       autoSwaps: check?.autoSwaps.length ? check.autoSwaps : undefined,
     });
     setSubmitError(error ? { form: formKey, message: error } : null);
+    // 教室被系統導正且沒有讓位：完成後另以彈窗告知（有讓位時由完成提示說明）
+    const notice = check?.notices[0];
+    if (!error && notice && !check?.autoSwaps.length) systemAlert(notice, '教室調度');
   };
 
   // 取消一律作用於原課堂內容（不帶表單中尚未送出的修改）
@@ -256,7 +261,7 @@ function BookingEditDialog({
 
         {hasNoEffect ? (
           <div role="alert" className="rounded-2xl border border-amber-300 bg-amber-50 p-3 font-bold text-amber-800 leading-relaxed">
-            ℹ️ {check?.notices[0] ? `教室調度：${check.notices[0]}。` : ''}調整後的結果與原課堂相同，無法變更。
+            ℹ️ 課堂未變更：{check?.notices[0] ? `教室調度（${check.notices[0]}）後，` : ''}結果與原課堂相同，無法送出。
           </div>
         ) : (
           <BookingCheckCard result={check} userRole={userRole} teachers={teachers} />

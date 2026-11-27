@@ -39,6 +39,7 @@ import {
   shouldAutoReschedule,
   canPostponeOnCancel,
   canRelocateToSmall,
+  isYieldableLesson,
   findOtherPriorityOwner,
   findReplaceableAutoBooking,
   formatTimestamp,
@@ -209,8 +210,12 @@ export default function Home() {
 
   const countTeachers = (swaps: AutoSwapItem[]) => new Set(swaps.map(s => s.teacherId)).size;
 
-  const navigateToStudent = (identifier: string, sourceTab: number, isId: boolean = false) => {
-    const s = isId ? students.find(item => item.id === identifier) : students.find(item => item.name === identifier);
+  /** 讓位完成提示（手動預約、改期、自動排課、順延補排共用） */
+  const swapSummary = (swaps: AutoSwapItem[]) =>
+    `原大教室 ${swaps.length} 堂 1v1 已移至小教室，並通知 ${countTeachers(swaps)} 位原任課老師`;
+
+  const navigateToStudent = (studentId: string, sourceTab: number) => {
+    const s = students.find(item => item.id === studentId);
     if (s) {
       setPreviousTab(sourceTab);
       setSelectedStudentId(s.id);
@@ -235,11 +240,8 @@ export default function Home() {
       : bookableStudents;
 
   // 開啟全域預約彈窗的統一入口
-  const openGlobalBooking = (preset?: Partial<BookingFormState> & { studentName?: string }) => {
-    const target =
-      students.find(s => s.id === preset?.studentId) ??
-      bookableStudents.find(s => s.name === preset?.studentName) ??
-      bookableStudents[0];
+  const openGlobalBooking = (preset?: Partial<BookingFormState>) => {
+    const target = students.find(s => s.id === preset?.studentId) ?? bookableStudents[0];
     const teacherId = preset?.teacherId || currentUserId;
     const lessonType = preset?.lessonType || getStudentBookingPreset(target, teacherId).lessonType;
 
@@ -394,11 +396,17 @@ export default function Home() {
   };
 
   // 支援重排替換 (Clean Baseline) 與一般新增累加
-  const handleAddBookings = (newBks: BookingItem[], cleanBase?: BookingItem[], mode?: 'append_remaining' | 'replace_future') => {
+  const handleAddBookings = (
+    newBks: BookingItem[],
+    cleanBase?: BookingItem[],
+    mode?: 'append_remaining' | 'replace_future',
+    /** 排課引擎為 1v2 讓位而需移至小教室的既有 1v1 */
+    autoSwaps: AutoSwapItem[] = []
+  ) => {
     if (cleanBase) {
-      setBookings(() => [...cleanBase, ...newBks]);
+      setBookings(() => applyAutoSwaps([...cleanBase, ...newBks], autoSwaps));
     } else {
-      setBookings(prev => [...prev, ...newBks]);
+      setBookings(prev => applyAutoSwaps([...prev, ...newBks], autoSwaps));
     }
 
     // 自動排課：不論排入幾堂，合併為單一筆「系統預排」通知
@@ -425,6 +433,16 @@ export default function Home() {
     // 待審課堂（一般老師）：合併送審 + 紅色通知；14 天內使用他人優先時段則通知該老師
     submitPendingBookings(newBks, '自動排課');
     notifyPriorityOwners(newBks);
+
+    // 大教室讓位：通知每一堂被移動課堂的原老師
+    if (newBks.length > 0 && autoSwaps.length > 0) {
+      pushLogs(buildSwapLogItems(autoSwaps, {
+        byTeacherName: cleanName(newBks[0].teacherId),
+        newStudentName: newBks[0].studentName,
+        newLessonType: '1v2',
+      }));
+      showToast(`調度成功：${swapSummary(autoSwaps)}`);
+    }
   };
 
   // 1v2 智能調度引擎：全站唯一預約入口（時間限制 → 教室調度/讓位 → 全局衝堂 → 額度）
@@ -530,7 +548,7 @@ export default function Home() {
     // ---- 寫入完成後才顯示提示 ----
     if (rebateNotice) systemAlert(rebateNotice, '預排課程已回扣');
     if (validation.autoSwaps.length > 0) {
-      showToast(`調度成功：原大教室 ${validation.autoSwaps.length} 堂 1v1 已移至小教室，並通知 ${countTeachers(validation.autoSwaps)} 位原任課老師`);
+      showToast(`調度成功：${swapSummary(validation.autoSwaps)}`);
     } else if (needsReview) {
       showToast(`已送交${REVIEW_TAG}，待管理員核准`);
     } else if (!opts.silentSuccess) {
@@ -545,7 +563,7 @@ export default function Home() {
     bookingsAfterCancel: BookingItem[],
     /** true = 操作者在取消確認彈窗選擇順延；false = 依學員開關自動判定（系統取消） */
     requested = false
-  ): { added?: BookingItem; message?: string } => {
+  ): { added?: BookingItem; autoSwaps?: AutoSwapItem[]; message?: string } => {
     const stu = students.find(s => matchesStudent(s, cancelled.studentId, cancelled.studentName));
     // 無固定時間沒有時段可依循、封存學員不可再排課，一律不順延
     if (!stu || !(requested ? canPostponeOnCancel(stu) : shouldAutoReschedule(stu))) return {};
@@ -570,8 +588,16 @@ export default function Home() {
       priorityGrid,
       userRole: userRole === 'admin' ? 'admin' : 'teacher',
     });
-    return { added: res.postponedBooking ?? undefined, message: res.alertMsg };
+    return { added: res.postponedBooking ?? undefined, autoSwaps: res.autoSwaps, message: res.alertMsg };
   };
+
+  /** 順延補排觸發的大教室讓位通知 */
+  const buildPostponeSwapLogs = (added: BookingItem, swaps: AutoSwapItem[]) =>
+    buildSwapLogItems(swaps, {
+      byTeacherName: cleanName(added.teacherId),
+      newStudentName: added.studentName,
+      newLessonType: added.lessonType,
+    });
 
   const buildPostponeLog = (cancelled: BookingItem, added: BookingItem): AuditLogItem =>
     buildLessonLog(
@@ -755,12 +781,13 @@ export default function Home() {
         : {};
       if (postponed.added) {
         const added = postponed.added;
+        const swaps = postponed.autoSwaps ?? [];
         const addedTime = `${formatDateWithDay(added.date)} ${formatTimeStr(added.startHour, added.startMin)}`;
-        setBookings(prev => [...prev, added]);
+        setBookings(prev => applyAutoSwaps([...prev, added], swaps));
         submitPendingBookings([added], '取消後自動順延');
-        pushLogs([buildPostponeLog(target, added)]);
+        pushLogs([...buildPostponeSwapLogs(added, swaps), buildPostponeLog(target, added)]);
         notifyPriorityOwners([added]);
-        showToast(`${doneText}，並已為學員自動順延補排一堂課（${addedTime}）`);
+        showToast(`${doneText}，並已為學員自動順延補排一堂課（${addedTime}）${swaps.length > 0 ? `；${swapSummary(swaps)}` : ''}`);
       } else {
         showToast(doneText);
         if (postpone) {
@@ -782,8 +809,8 @@ export default function Home() {
     const swapIds = new Set(autoSwaps.map(s => s.bookingId));
     const swapTargets = autoSwaps.map(s => bookings.find(b => b.id === s.bookingId));
     const swapInvalid = swapTargets.some(b =>
-      !b || b.id === bookingId || b.roomType !== 'large' || b.lessonType !== '1v1' ||
-      !isActionableBooking(b) || !canRelocateToSmall(b, bookings, bookingId)
+      !b || b.id === bookingId || b.roomType !== 'large' ||
+      !isYieldableLesson(b) || !canRelocateToSmall(b, bookings, bookingId)
     );
     if (swapInvalid) {
       return '原大教室課堂的狀態已變動或小教室已無法容納，系統已中止調度，請重新操作。';
@@ -847,9 +874,7 @@ export default function Home() {
       return swapIds.has(b.id) ? { ...b, roomType: 'small' as const } : b;
     }));
     if (swapLogs.length > 0) setLogs(prev => [...swapLogs.slice().reverse(), ...prev]);
-    const afterWriteNotice = swapLogs.length > 0
-      ? `；原大教室 ${autoSwaps.length} 堂 1v1 已移至小教室並通知 ${countTeachers(autoSwaps)} 位原任課老師`
-      : '';
+    const afterWriteNotice = swapLogs.length > 0 ? `；${swapSummary(autoSwaps)}` : '';
 
     // 標題只寫變更後的時段與教室，原定課程寫在內文
     const detail = `原定課程：${formatLessonRef(target)}\n結果：${changeType}完成`;
@@ -928,15 +953,17 @@ export default function Home() {
     // 系統取消：依學員開關逐堂順延補排
     let next = bookings.map(apply);
     const added: BookingItem[] = [];
+    const swaps: AutoSwapItem[] = [];
     const postponeLogs: AuditLogItem[] = [];
     if (!isSign) {
       entries.forEach(({ booking, log }) => {
         const result = tryAutoPostpone(booking, next);
         if (!result.added || !log.settlement) return;
         added.push(result.added);
-        next = [...next, result.added];
+        swaps.push(...(result.autoSwaps ?? []));
+        next = applyAutoSwaps([...next, result.added], result.autoSwaps ?? []);
         const postponeLog = buildPostponeLog(booking, result.added);
-        postponeLogs.push(postponeLog);
+        postponeLogs.push(...buildPostponeSwapLogs(result.added, result.autoSwaps ?? []), postponeLog);
         log.settlement = { ...log.settlement, postponedBookingId: result.added.id, postponeLogId: postponeLog.id };
       });
     }
@@ -944,7 +971,7 @@ export default function Home() {
     setStudents(prev => prev.map(st =>
       creditDeltas[st.id] ? { ...st, credits: st.credits + creditDeltas[st.id] } : st
     ));
-    setBookings(prev => [...prev.map(apply), ...added]);
+    setBookings(prev => applyAutoSwaps([...prev.map(apply), ...added], swaps));
     pushLogs([...postponeLogs, ...entries.map(e => e.log)]);
     settlePreBookingReviews(targets.map(b => b.id), next);
     submitPendingBookings(added, '取消後自動順延');
@@ -1056,7 +1083,7 @@ export default function Home() {
             : getSelfCancelSeverity(userRole === 'admin', items.some(b => patches.get(b.id)?.isLateCancel)),
           stu.name, teacherId, undefined, undefined, userRole === 'admin' ? 'Daisy' : tName
         ),
-        title: `${tName}・${stu.name} 清空預排 ${items.length} 堂`,
+        title: formatLessonsTitle(tName, stu.name, items),
       };
     }));
     showToast(`已清空 ${targets.length} 堂預排`);
@@ -1196,7 +1223,8 @@ export default function Home() {
         return;
       }
       const snaps = new Map(rev.bookingSnapshots.map(b => [b.id, b]));
-      setBookings(prev => prev.map(b => snaps.has(b.id) ? { ...(snaps.get(b.id) as BookingItem) } : b));
+      // 上課筆記不屬於審核內容，撤銷時保留目前版本
+      setBookings(prev => prev.map(b => snaps.has(b.id) ? { ...(snaps.get(b.id) as BookingItem), teacherNote: b.teacherNote } : b));
       setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, status: 'pending' as const, bookingSnapshots: undefined } : r));
       logReset();
       showToast('已撤銷審核，整批課堂已還原，案件回到待審');
@@ -1214,7 +1242,7 @@ export default function Home() {
       showToast('此課堂在審核後已有後續變動（簽到、改期、取消等），無法撤銷審核');
       return;
     }
-    setBookings(prev => prev.map(b => b.id === rev.bookingId ? { ...snapshot } : b));
+    setBookings(prev => prev.map(b => b.id === rev.bookingId ? { ...snapshot, teacherNote: b.teacherNote } : b));
     setReviews(prev => prev.map(r => r.id === reviewId
       ? { ...r, status: 'pending' as const, bookingSnapshot: undefined, bookingAfter: undefined }
       : r));
@@ -1229,7 +1257,6 @@ export default function Home() {
     timestamp: string, 
     isLate: boolean = false
   ) => {
-    console.log("🌟 handleSign 接收到:", { bookingId, isLate });
     // 1. 同步找出目標課堂與學生資訊
     const targetBooking = bookings.find(b => b.id === bookingId);
     if (!targetBooking) {
@@ -1514,7 +1541,7 @@ export default function Home() {
                 priorityGrid={priorityGrid}
                 onExecuteReschedule={handleExecuteReschedule}
                 showToast={showToast} 
-                onSelectStudent={(sName: string) => navigateToStudent(sName, 1)}
+                onSelectStudent={(id: string) => navigateToStudent(id, 1)}
                 viewMode={tab1View}
                 setViewMode={setTab1View}
                 openGlobalBooking={openGlobalBooking}
@@ -1540,7 +1567,7 @@ export default function Home() {
                   showToast('備註已更新'); 
                 }} 
                 showToast={showToast} 
-                onSelectStudent={(sName: string) => navigateToStudent(sName, 2)} 
+                onSelectStudent={(id: string) => navigateToStudent(id, 2)} 
                 viewMode={tab2View}
                 setViewMode={setTab2View}
                 openGlobalBooking={openGlobalBooking}
@@ -1586,7 +1613,7 @@ export default function Home() {
                   students={students}
                   setStudents={setStudents}
                   onUpdateStudent={handleUpdateStudent}
-                  onSelectStudent={(id: string) => navigateToStudent(id, 3, true)}
+                  onSelectStudent={(id: string) => navigateToStudent(id, 3)}
                   isCreateModalOpen={isCreateStudentOpen}
                   setIsCreateModalOpen={setIsCreateStudentOpen}
                   onAddBookings={handleAddBookings}
