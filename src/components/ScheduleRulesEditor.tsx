@@ -79,7 +79,7 @@ export default function ScheduleRulesEditor({ value, onChange, today, createRule
           <span className="text-[10px] text-slate-400 block">
             {noRegularRule
               ? '無固定時段可依循，取消課堂後不順延補排'
-              : '取消課堂時，依固定時段往後補排 1 堂'}
+              : '取消課堂時，確認視窗預設建議順延補排 1 堂'}
           </span>
         </span>
         <span className={`shrink-0 relative inline-block w-8 h-[18px] rounded-full transition-colors ${autoRescheduleOnCancel ? 'bg-emerald-500' : 'bg-slate-300'}`}>

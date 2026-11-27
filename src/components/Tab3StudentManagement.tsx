@@ -10,7 +10,7 @@ import {
   ScheduleEngineResult 
 } from '../mockData';
 
-import { formatStudentSchedule, isOverdueUnsettled, isArchivedStudent, countScheduledLessons, archiveConfirmMessage, matchesStudent, DAY_HOURS, BUSINESS_MINUTES, REVIEW_TAG, findNextLesson } from '../utils/bookingRules';
+import { formatStudentSchedule, isArchivedStudent, archiveConfirmMessage, DAY_HOURS, BUSINESS_MINUTES, REVIEW_TAG, calculateStudentStats } from '../utils/bookingRules';
 import BookingCheckCard from './BookingCheckCard';
 import ScheduleRulesEditor, { type ScheduleSettings } from './ScheduleRulesEditor';
 import { useNow } from '../utils/useToday';
@@ -90,10 +90,10 @@ export default function Tab3StudentManagement({
       return true;
     });
 
-    // 下堂課一律由實際預約推導；沒有預排者排在最後
-    const rows = list.map((s: any) => ({ ...s, next: findNextLesson(bookings, s, now) }));
-    const nextKey = (r: any) => r.next
-      ? `${r.next.date} ${formatTimeStr(r.next.startHour, r.next.startMin)}`
+    // 下堂課與逾期提示一律由共用堂數計算機推導；沒有預排者排在最後
+    const rows = list.map((s: any) => ({ ...s, stats: calculateStudentStats(bookings, s, now) }));
+    const nextKey = ({ stats: { nextLesson: next } }: any) => next
+      ? `${next.date} ${formatTimeStr(next.startHour, next.startMin)}`
       : '9999';
     rows.sort((a: any, b: any) => {
       const valA = sortField === 'name' ? a.name : nextKey(a);
@@ -127,7 +127,7 @@ export default function Tab3StudentManagement({
       showToast(`學員 [${s.name}] 已恢復上課`);
       return;
     }
-    const ok = await systemConfirm(archiveConfirmMessage(s.name, countScheduledLessons(bookings, s)));
+    const ok = await systemConfirm(archiveConfirmMessage(s.name, calculateStudentStats(bookings, s, now).upcomingCount));
     if (!ok) return;
     onUpdateStudent({ id: s.id, status: 'archived' });
     showToast(`學員 [${s.name}] 已移至封存`);
@@ -323,11 +323,7 @@ export default function Tab3StudentManagement({
               <tr><td colSpan={4}className="text-center py-8 text-slate-400 font-sans font-bold">目前無學員資料</td></tr>
             )}
             {sortedActive.map((s: any) => {
-              // 檢查該學員是否有逾期未簽/未處理之課堂
-              const hasOverdueUnsigned = bookings?.some((b: any) => 
-                matchesStudent(s, b.studentId, b.studentName) &&
-                isOverdueUnsettled(b, now)
-              );
+              const next = s.stats.nextLesson;
 
               return (
                 <tr key={s.id} onClick={() => onSelectStudent(s.id)} className="hover:bg-rose-50/50 transition cursor-pointer">
@@ -336,7 +332,7 @@ export default function Tab3StudentManagement({
                       <div className="flex items-center gap-1.5">
                         <span>{s.name}</span>
                         {/* 逾期未簽紅點提示（優雅微型呼吸點，不破壞版面） */}
-                        {hasOverdueUnsigned && (
+                        {s.stats.overdueCount > 0 && (
                           <span className="relative flex h-2 w-2" title="有逾期未簽到 / 待結算課堂">
                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
                             <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500 shadow-2xs"></span>
@@ -348,7 +344,7 @@ export default function Tab3StudentManagement({
                   </td>
                   <td className="py-3.5 px-3 font-sans font-bold text-slate-800">
                     <div className="flex flex-col gap-0.5">
-                      <span>{s.next ? `${formatDateWithDay(s.next.date)} ${formatTimeStr(s.next.startHour, s.next.startMin)}` : '未排定'}</span>
+                      <span>{next ? `${formatDateWithDay(next.date)} ${formatTimeStr(next.startHour, next.startMin)}` : '未排定'}</span>
                       <span className="text-[10px] text-slate-400 font-mono">{formatStudentSchedule(s)}</span>
                     </div>
                   </td>

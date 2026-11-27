@@ -96,6 +96,19 @@ export interface BookingItem {
   isLateCancel?: boolean;
   /** 取消原因標記（non_priority_rejected = 送審預約被駁回，不計入取消統計） */
   cancelReason?: string;
+  /** 最近一次改期（日期或時間變動）紀錄；僅改教室不寫入。簽到 / 取消後仍保留 */
+  rescheduledInfo?: RescheduledInfo;
+}
+
+export interface RescheduledInfo {
+  /** 改期操作時間 YYYY/MM/DD HH:mm */
+  updatedAt: string;
+  /** 改期前的日期 YYYY-MM-DD */
+  originalDate: string;
+  /** 改期前的開始時間 HH:mm */
+  originalStartTime: string;
+  /** 改期前的教室（'large' | 'small'） */
+  originalRoomId: string;
 }
 
 export interface ReviewItem {
@@ -126,16 +139,19 @@ export interface ReviewItem {
   bookingAfter?: BookingItem;
 }
 
-/** 逾期結算紀錄：掛在結算通知上，供管理員撤銷（Undo） */
+/** 逾期處理方式：系統代簽（扣 1 堂）/ 系統取消（不扣堂） */
+export type SettlementAction = 'system_sign' | 'system_cancel';
+
+/** 逾期處理紀錄：掛在系統代簽 / 系統取消通知上，供管理員撤銷（Undo） */
 export interface SettlementRecord {
-  action: 'system_sign' | 'system_cancel';
+  action: SettlementAction;
   bookingId: string;
   studentId?: string;
-  /** 結算操作時間，與課堂上的 systemSignedAt / systemCancelledAt 相同 */
+  /** 操作時間，與課堂上的 systemSignedAt / systemCancelledAt 相同 */
   settledAt: string;
-  /** 結算前課堂快照（撤銷時還原） */
+  /** 操作前課堂快照（撤銷時還原） */
   snapshot: BookingItem;
-  /** 本次結算扣除的堂數（撤銷時回補） */
+  /** 本次扣除的堂數（撤銷時回補） */
   creditsDeducted: number;
   /** 系統取消觸發的自動順延補排課堂（撤銷時移除） */
   postponedBookingId?: string;

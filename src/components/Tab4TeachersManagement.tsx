@@ -4,12 +4,12 @@ import React, { useState, useMemo } from 'react';
 import { Users, FileSpreadsheet, ChevronDown, ChevronUp, Mail, ArrowLeft, Edit3, X, UserPlus, Check, Lock } from 'lucide-react';
 import { BookingStatusBadge } from './SignatureModals';
 import { PRESET_COLORS, formatTimeStr, formatDateWithDay } from '../mockData';
-import { deriveMonthKeys, deriveTeacherMonthKeys, formatMonthKey, getTeacherStats as computeTeacherStats, monthKeyOf, compareByStart, REVIEW_TAG } from '../utils/bookingRules';
+import { deriveMonthKeys, deriveTeacherMonthKeys, formatMonthKey, calculateTeacherMonthlyStats, sumTeacherMonthStats, filterMonthBookings, monthKeyOf, compareByStart, REVIEW_TAG } from '../utils/bookingRules';
 import type { TeacherMonthStats } from '../utils/bookingRules';
 import { systemAlert } from '../utils/systemAlert';
 import { useNow } from '../utils/useToday';
 
-/** 一般老師月份表的數值欄（月份列與合計列共用） */
+/** 授課統計表的數值欄（管理員老師列、一般老師月份列與合計列共用） */
 const StatCells = ({ s }: { s: TeacherMonthStats }) => (
   <>
     <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
@@ -107,34 +107,21 @@ export default function Tab4TeachersManagement({
     return set;
   }, [teachers]);
 
-  // 依照選擇的月份動態過濾 bookings
-  const filteredBookings = bookings.filter((b: any) => {
-    const isTarget = userRole === 'admin' || b.teacherId === currentUserId;
-    return isTarget && monthKeyOf(b.date) === selectedMonth;
-  }).sort(compareByStart);
+  // 明細列表：與統計表同一月份範圍（一般老師僅自己的課堂）
+  const filteredBookings = filterMonthBookings(bookings, selectedMonth, isAdmin ? undefined : currentUserId)
+    .sort(compareByStart);
 
-  // 老師與管理員共用同一個統計口徑（bookingRules.getTeacherStats）
-  const getTeacherStats = (tId: string, monthKey: string = selectedMonth) =>
-    computeTeacherStats(bookings, monthKey, tId, now);
+  // 老師與管理員共用同一個堂數計算機
+  const statsFor = (tId: string, monthKey: string = selectedMonth) =>
+    calculateTeacherMonthlyStats(bookings, monthKey, tId, now);
 
   const activeTeachers = Object.values(teachers).filter((t: any) => t.isActive);
   // 一般老師：以查詢月份 M 為基準的 M-4 ～ M+1 各月統計（新到舊），合計僅加總表內月份
   const myMonthRows = isAdmin
     ? []
     : deriveTeacherMonthKeys(bookings, selectedMonth, currentUserId)
-        .map(k => ({ key: k, stats: getTeacherStats(currentUserId, k) }));
-  const myTotals = myMonthRows.reduce<TeacherMonthStats>(
-    (sum, { stats }) => ({
-      count1v1: sum.count1v1 + stats.count1v1,
-      count1v2: sum.count1v2 + stats.count1v2,
-      total: sum.total + stats.total,
-      unsettled: sum.unsettled + stats.unsettled,
-      upcoming: sum.upcoming + stats.upcoming,
-      normalCancel: sum.normalCancel + stats.normalCancel,
-      lateCancel: sum.lateCancel + stats.lateCancel,
-    }),
-    { count1v1: 0, count1v2: 0, total: 0, unsettled: 0, upcoming: 0, normalCancel: 0, lateCancel: 0 },
-  );
+        .map(k => ({ key: k, stats: statsFor(currentUserId, k) }));
+  const myTotals = sumTeacherMonthStats(myMonthRows.map(r => r.stats));
   const archivedTeachers = Object.values(teachers).filter((t: any) => !t.isActive);
 
   // 儲存新增老師
@@ -222,7 +209,7 @@ export default function Tab4TeachersManagement({
                 </tr>
               )}
               {isAdmin && activeTeachers.map((t: any) => {
-                const s = getTeacherStats(t.id);
+                const s = statsFor(t.id);
                 return (
                   <tr key={t.id} className="hover:bg-slate-50 transition">
                     {/* 補齊代表色圓點與字體樣式，與下方清單完全統一 */}
@@ -232,13 +219,9 @@ export default function Tab4TeachersManagement({
                         <span className={`font-black ${t.text}`}>{t.name}</span>
                       </div>
                     </td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.count1v1}</td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.count1v2}</td>
-                    <td className="py-2.5 px-1 font-black text-slate-900">{s.total}</td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.unsettled}</td>
-                    <td className="py-2.5 px-1 text-slate-700">{s.upcoming}</td>
+                    <StatCells s={s} />
                     <td className="py-2.5 px-1 text-slate-700">
-                      <span className="font-black">{s.normalCancel + s.lateCancel}</span>
+                      <span className="font-black">{s.cancelled}</span>
                       <span className="block text-[10px] text-slate-400 font-sans whitespace-nowrap">
                         正常 {s.normalCancel}・<span className="text-rose-600">超時 {s.lateCancel}</span>
                       </span>
@@ -286,7 +269,7 @@ export default function Tab4TeachersManagement({
                   
                   {/* 精確狀態標籤：全站統一由 BookingStatusBadge 渲染 */}
                   <div className="ml-auto">
-                    <BookingStatusBadge booking={b} showLessonState showSignedTime />
+                    <BookingStatusBadge booking={b} showLessonState />
                   </div>
                 </div>
               );
@@ -567,10 +550,10 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
   const monthKeys = useMemo(() => deriveMonthKeys(bookings, today), [bookings, today]);
   const currentMonthKey = monthKeyOf(today);
   const now = useNow();
-  const historyStats = useMemo(() => monthKeys.map(k => {
-    const st = computeTeacherStats(bookings, k, teacher.id, now);
-    return { isCurrent: k === currentMonthKey, month: `${formatMonthKey(k)}${k === currentMonthKey ? ' (當月)' : ''}`, v1: st.count1v1, v2: st.count1v2, total: st.total, unsettled: st.unsettled, upcoming: st.upcoming, late: st.lateCancel, normal: st.normalCancel };
-  }), [bookings, monthKeys, teacher.id, currentMonthKey, now]);
+  const historyStats = useMemo(
+    () => monthKeys.map(k => ({ key: k, stats: calculateTeacherMonthlyStats(bookings, k, teacher.id, now) })),
+    [bookings, monthKeys, teacher.id, now],
+  );
 
   return (
     <div className="space-y-4 animate-in fade-in slide-in-from-right-4 pb-20">
@@ -641,18 +624,17 @@ export function TeacherDetailView({ teacher, onBack, onUpdateTeacher, priorityGr
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
-            {historyStats.slice(0, expandStats ? historyStats.length : 5).map((s, idx) => (
-              <tr key={idx} className={s.isCurrent ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
-                <td className="py-2.5 text-left font-bold font-sans text-slate-900">{s.month}</td>
-                <td className="py-2.5">{s.v1}</td>
-                <td className="py-2.5">{s.v2}</td>
-                <td className="py-2.5 font-black text-slate-900">{s.total}</td>
-                <td className="py-2.5">{s.unsettled}</td>
-                <td className="py-2.5">{s.upcoming}</td>
-                <td className="py-2.5">{s.late}</td>
-                <td className="py-2.5">{s.normal}</td>
-              </tr>
-            ))}
+            {historyStats.slice(0, expandStats ? historyStats.length : 5).map(({ key, stats: s }) => {
+              const isCurrent = key === currentMonthKey;
+              return (
+                <tr key={key} className={isCurrent ? "bg-rose-50/50" : "hover:bg-slate-50 transition"}>
+                  <td className="py-2.5 text-left font-bold font-sans text-slate-900">{formatMonthKey(key)}{isCurrent ? ' (當月)' : ''}</td>
+                  <StatCells s={s} />
+                  <td className="py-2.5">{s.lateCancel}</td>
+                  <td className="py-2.5">{s.normalCancel}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         </div>

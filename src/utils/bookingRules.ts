@@ -7,6 +7,7 @@ import type {
   AuditLogItem,
   BookingItem,
   PriorityGrid,
+  RescheduledInfo,
   StudentItem,
   TeacherProfile,
 } from '../types';
@@ -103,30 +104,32 @@ export const isSignableBooking = (b: Pick<BookingItem, 'status' | 'signed'>): bo
 export const isTaughtBooking = (b: Pick<BookingItem, 'status' | 'signed'>): boolean =>
   b.status === 'confirmed' && !!b.signed;
 
+// ------------------------------------------
+// 課堂生命週期分類器（全站唯一）
+// ------------------------------------------
+
+/** upcoming = 即將上課；overdue = 逾期未處理（未結）；history = 歷史紀錄。三者互斥且涵蓋所有課堂 */
+export type BookingLifecycle = 'upcoming' | 'overdue' | 'history';
+
+type LifecycleSource = Pick<BookingItem, 'status' | 'signed' | 'date' | 'startHour' | 'startMin'>;
+
 /**
- * 逾期未處理（未結）—— 全站唯一口徑：開課時間（date + startTime）<= 現在，且尚未簽到、未取消。
- * 當天已開課未簽到也算逾期。注意：不可直接當作 filter callback（第二個參數是現在時間）。
+ * 全站唯一的課堂歸屬判斷：
+ *  - history：已完成簽到（現場簽到 / 補簽 / 系統代簽）或已取消（含超時取消 / 系統取消 / 審核駁回）
+ *  - overdue：未簽到、未取消，且開課時間 <= 現在
+ *  - upcoming：未簽到、未取消，且開課時間 > 現在（含 confirmed 與 special_pending）
+ * 注意：不可直接當作 map / filter callback（第二個參數是現在時間）。
  */
-export const isOverdueUnsettled = (
-  b: Pick<BookingItem, 'status' | 'signed' | 'date' | 'startHour' | 'startMin'>,
-  now: Date = new Date(),
-): boolean => occupiesQuota(b) && !isFutureLesson(b.date, b.startHour, b.startMin, now);
+export const classifyBookingLifecycle = (b: LifecycleSource, now: Date = new Date()): BookingLifecycle => {
+  if (!occupiesQuota(b)) return 'history';
+  return isFutureLesson(b.date, b.startHour, b.startMin, now) ? 'upcoming' : 'overdue';
+};
 
 /** 依開課日期時間由早到晚排序 */
 export const compareByStart = (
   a: Pick<BookingItem, 'date' | 'startHour' | 'startMin'>,
   b: Pick<BookingItem, 'date' | 'startHour' | 'startMin'>,
 ): number => a.date.localeCompare(b.date) || a.startHour * 60 + a.startMin - (b.startHour * 60 + b.startMin);
-
-/** 學員的下堂課：尚未開課、佔額度的預約中最早的一堂 */
-export const findNextLesson = (
-  bookings: BookingItem[],
-  student: { id: string; name: string },
-  now: Date = new Date(),
-): BookingItem | undefined =>
-  bookings
-    .filter(b => matchesStudent(student, b.studentId, b.studentName) && occupiesQuota(b) && !isOverdueUnsettled(b, now))
-    .sort(compareByStart)[0];
 
 /** 已封存學員不可再被排課（下拉選單與自動順延一律排除） */
 export const isArchivedStudent = (s: Pick<StudentItem, 'status'>): boolean => s.status === 'archived';
@@ -135,20 +138,18 @@ export const isArchivedStudent = (s: Pick<StudentItem, 'status'>): boolean => s.
 export const isFlexibleSchedule = (s: Pick<StudentItem, 'noRegularRule' | 'rules'>): boolean =>
   !!s.noRegularRule || !s.rules?.some(r => r.freq !== '不固定');
 
-/** 課堂取消後是否自動順延補排：開關開啟、有固定時段且未封存（無固定時間一律不順延） */
+/** 取消時可否順延補排：有固定時段且未封存 */
+export const canPostponeOnCancel = (
+  s: Pick<StudentItem, 'status' | 'noRegularRule' | 'rules'>,
+): boolean => !isFlexibleSchedule(s) && !isArchivedStudent(s);
+
+/**
+ * 學員的順延偏好（開關開啟且可順延）：決定取消確認彈窗的主視覺按鈕；
+ * 系統取消也據此自動補排
+ */
 export const shouldAutoReschedule = (
   s: Pick<StudentItem, 'autoRescheduleOnCancel' | 'status' | 'noRegularRule' | 'rules'>,
-): boolean => s.autoRescheduleOnCancel && !isFlexibleSchedule(s) && !isArchivedStudent(s);
-
-/** 學員仍有效的預排堂數（尚未開課、佔額度；與學員詳情頁「預排課程」同一口徑） */
-export const countScheduledLessons = (
-  bookings: BookingItem[],
-  student: { id: string; name: string },
-  now: Date = new Date(),
-): number =>
-  bookings.filter(
-    b => matchesStudent(student, b.studentId, b.studentName) && occupiesQuota(b) && !isOverdueUnsettled(b, now),
-  ).length;
+): boolean => s.autoRescheduleOnCancel && canPostponeOnCancel(s);
 
 /** 封存確認提示（學員列表開關與詳情頁按鈕共用） */
 export const archiveConfirmMessage = (name: string, scheduledCount: number): string =>
@@ -162,6 +163,83 @@ export const matchesStudent = (
   studentId?: string,
   studentName?: string,
 ): boolean => (studentId ? s.id === studentId : !!studentName && s.name === studentName);
+
+// ------------------------------------------
+// 學員堂數計算機（全站唯一）
+// ------------------------------------------
+
+export interface StudentStats {
+  /** 剩餘堂數（簽到當下已扣堂，可為負數） */
+  remainingCredits: number;
+  /** 已扣堂數 / 歷史簽到：已簽到授課的堂數（含補簽、系統代簽）；僅供參考，不再從剩餘堂數扣減 */
+  deductedCount: number;
+  /** 歷史紀錄（已簽到、已取消），最新在前 */
+  history: BookingItem[];
+  /** 未結逾期，由早到晚 */
+  overdue: BookingItem[];
+  /** 未來預排（含非優先審核中），由早到晚 */
+  upcoming: BookingItem[];
+  /** 下堂課：未來預排中最早的一堂 */
+  nextLesson?: BookingItem;
+  overdueCount: number;
+  upcomingCount: number;
+  /** 未來預排中屬非優先審核中的堂數 */
+  pendingCount: number;
+  /** 未來預排中已確認的堂數 */
+  confirmedFutureCount: number;
+  /** 佔用額度 = 逾期 + 未來預排 */
+  occupiedCount: number;
+  /** 透支堂數 = max(0, 佔用額度 - 剩餘) */
+  overdrawnCount: number;
+  /** 剩餘可排 = max(0, 剩餘 - 佔用額度) */
+  availableToSchedule: number;
+  /** 重排總堂數 = max(0, 剩餘 - (逾期 + 待審)) */
+  replaceTotal: number;
+}
+
+export const calculateStudentStats = (
+  bookings: BookingItem[],
+  student: { id: string; name: string; credits: number },
+  now: Date = new Date(),
+): StudentStats => {
+  const history: BookingItem[] = [];
+  const overdue: BookingItem[] = [];
+  const upcoming: BookingItem[] = [];
+  const groups = { history, overdue, upcoming };
+  bookings
+    .filter(b => matchesStudent(student, b.studentId, b.studentName))
+    .sort(compareByStart)
+    .forEach(b => groups[classifyBookingLifecycle(b, now)].push(b));
+  history.reverse();
+
+  const remainingCredits = student.credits ?? 0;
+  const pendingCount = upcoming.filter(isPendingApproval).length;
+  const occupiedCount = overdue.length + upcoming.length;
+
+  return {
+    remainingCredits,
+    deductedCount: history.filter(isTaughtBooking).length,
+    history,
+    overdue,
+    upcoming,
+    nextLesson: upcoming[0],
+    overdueCount: overdue.length,
+    upcomingCount: upcoming.length,
+    pendingCount,
+    confirmedFutureCount: upcoming.length - pendingCount,
+    occupiedCount,
+    overdrawnCount: Math.max(0, occupiedCount - remainingCredits),
+    availableToSchedule: Math.max(0, remainingCredits - occupiedCount),
+    replaceTotal: Math.max(0, remainingCredits - (overdue.length + pendingCount)),
+  };
+};
+
+/** 可否對此逾期課堂執行系統代簽 / 系統取消：管理員或該堂任課老師 */
+export const canSettleBooking = (
+  b: Pick<BookingItem, 'teacherId'>,
+  userRole: UserRole,
+  userId: string,
+): boolean => userRole === 'admin' || b.teacherId === userId;
 
 /** 整筆課堂是否已釋出空位（日曆渲染與衝堂檢測共用） */
 export const isSlotReleased = (b: Pick<BookingItem, 'status'>): boolean => isCancelledSlot(b.status);
@@ -475,7 +553,7 @@ export interface BookingRequestInput {
 
 export interface QuotaInfo {
   credits: number;
-  /** 已佔用額度（occupiesQuota，不含本次） */
+  /** 已佔用額度（calculateStudentStats.occupiedCount，不含本次） */
   occupied: number;
   /** 加上本次後是否超出剩餘堂數 */
   exceeds: boolean;
@@ -640,16 +718,16 @@ export const validateAndBuildBooking = ({
     return fail(conflict.reason || '該時段已有預約', 'conflict', { notices, autoSwaps });
   }
 
-  // 4. 額度（統一以 occupiesQuota 計算）
+  // 4. 額度（統一以 calculateStudentStats 計算）
   const student =
     studentOverride ??
     students.find(s => matchesStudent(s, input.studentId, input.studentName));
   let quota: QuotaInfo = { credits: 0, occupied: 0, exceeds: false, found: false };
   if (student && !skipQuota) {
-    const occupied = bookings.filter(
-      b => b.id !== excludeBookingId && matchesStudent(student, b.studentId, b.studentName) && occupiesQuota(b),
-    ).length;
-    const credits = student.credits ?? 0;
+    const { occupiedCount: occupied, remainingCredits: credits } = calculateStudentStats(
+      bookings.filter(b => b.id !== excludeBookingId),
+      student,
+    );
     quota = { credits, occupied, exceeds: occupied + 1 > credits, found: true };
   }
 
@@ -690,64 +768,10 @@ export const findReplaceableAutoBooking = (
   student: { id: string; name: string },
   now: Date = new Date(),
 ): BookingItem | undefined => {
-  const farthest = bookings
-    .filter(
-      b =>
-        matchesStudent(student, b.studentId, b.studentName) &&
-        b.isAuto === true &&
-        occupiesQuota(b) &&
-        !isOverdueUnsettled(b, now),
-    )
-    .sort((a, b) => a.date.localeCompare(b.date) || a.startHour * 60 + a.startMin - (b.startHour * 60 + b.startMin))
+  const farthest = calculateStudentStats(bookings, { ...student, credits: 0 }, now)
+    .upcoming.filter(b => b.isAuto === true)
     .pop();
   return farthest && farthest.status === 'confirmed' ? farthest : undefined;
-};
-
-// ------------------------------------------
-// 自動排課額度明細
-// ------------------------------------------
-
-export interface ScheduleQuota {
-  /** 學生剩餘堂數（簽到當下已扣堂） */
-  totalRemaining: number;
-  /** 歷史簽到：僅供參考，不參與扣減 */
-  signedCount: number;
-  /** 逾期紀錄：已開課、未簽到且仍佔額度（isOverdueUnsettled） */
-  overdueCount: number;
-  /** 待審核預約：尚未開課的非優先審核課堂 */
-  pendingCount: number;
-  /** 已經預排：尚未開課的 confirmed */
-  confirmedFutureCount: number;
-  /** 剩餘可排 = max(0, 剩餘 - (逾期 + 待審 + 已預排)) */
-  availableToSchedule: number;
-  /** 重排總堂數 = max(0, 剩餘 - (逾期 + 待審)) */
-  replaceTotal: number;
-}
-
-/**
- * 逾期 / 待審 / 已預排三者互斥，合計等於 occupiesQuota 的佔用堂數。
- */
-export const getScheduleQuota = (
-  bookings: BookingItem[],
-  student: { id: string; name: string; credits: number },
-  now: Date = new Date(),
-): ScheduleQuota => {
-  const own = bookings.filter(b => matchesStudent(student, b.studentId, b.studentName));
-  const occupied = own.filter(occupiesQuota);
-  const upcoming = occupied.filter(b => !isOverdueUnsettled(b, now));
-  const overdueCount = occupied.length - upcoming.length;
-  const pendingCount = upcoming.filter(isPendingApproval).length;
-  const confirmedFutureCount = upcoming.length - pendingCount;
-  const totalRemaining = student.credits;
-  return {
-    totalRemaining,
-    signedCount: own.filter(isTaughtBooking).length,
-    overdueCount,
-    pendingCount,
-    confirmedFutureCount,
-    availableToSchedule: Math.max(0, totalRemaining - (overdueCount + pendingCount + confirmedFutureCount)),
-    replaceTotal: Math.max(0, totalRemaining - (overdueCount + pendingCount)),
-  };
 };
 
 // ------------------------------------------
@@ -872,7 +896,7 @@ export const deriveTeacherMonthKeys = (
   const keys: string[] = [];
   for (let delta = TEACHER_MONTHS_AHEAD; delta >= -TEACHER_MONTHS_BACK; delta--) {
     const key = shiftMonthKey(baseMonth, delta);
-    if (delta >= 0 || Object.values(getTeacherStats(bookings, key, teacherId)).some(n => n > 0)) keys.push(key);
+    if (delta >= 0 || Object.values(calculateTeacherMonthlyStats(bookings, key, teacherId)).some(n => n > 0)) keys.push(key);
   }
   return keys;
 };
@@ -884,48 +908,75 @@ export const formatMonthKey = (key: string): string => {
 };
 
 export interface TeacherMonthStats {
+  /** 1v1 已授課 */
   count1v1: number;
+  /** 1v2 已授課 */
   count1v2: number;
+  /** 總授課 */
   total: number;
   /** 未結堂數：開課時間已過、尚未簽到也未取消（逾期待處理） */
   unsettled: number;
   /** 預排堂數：尚未開課且未簽到的預約（confirmed 與非優先審核中） */
   upcoming: number;
+  /** 取消堂數 = 正常取消 + 超時取消 */
+  cancelled: number;
   /** 正常取消（開課 24 小時以前；不含送審預約被駁回） */
   normalCancel: number;
   /** 超時取消（開課前 24 小時內取消） */
   lateCancel: number;
 }
 
+/** 某月份的課堂（teacherId 省略 = 全館）：統計與明細列表共用同一範圍 */
+export const filterMonthBookings = (
+  bookings: BookingItem[],
+  monthKey: string,
+  teacherId?: string,
+): BookingItem[] =>
+  bookings.filter(b => monthKeyOf(b.date) === monthKey && (!teacherId || b.teacherId === teacherId));
+
 /**
- * 老師月統計（全站唯一口徑）。teacherId 省略時統計整個 bookings 清單。
- * 已授課堂數一律以 isTaughtBooking 計算；未結一律以 isOverdueUnsettled 判定，其餘未簽有效課堂為預排。
+ * 老師月堂數計算機（全站唯一）。teacherId 省略時為管理員全館單月。
+ * 已授課以 isTaughtBooking 計算；未結 / 預排一律由 classifyBookingLifecycle 判定。
  */
-export const getTeacherStats = (
+export const calculateTeacherMonthlyStats = (
   bookings: BookingItem[],
   monthKey: string,
   teacherId?: string,
   now: Date = new Date(),
 ): TeacherMonthStats => {
-  const list = bookings.filter(
-    b => monthKeyOf(b.date) === monthKey && (!teacherId || b.teacherId === teacherId),
-  );
+  const list = filterMonthBookings(bookings, monthKey, teacherId);
+  const lifecycles = list.map(b => classifyBookingLifecycle(b, now));
   const count1v1 = list.filter(b => b.lessonType === '1v1' && isTaughtBooking(b)).length;
   const count1v2 = list.filter(b => b.lessonType === '1v2' && isTaughtBooking(b)).length;
   const cancelled = list.filter(b => b.status === 'cancelled_normal' && b.cancelReason !== 'non_priority_rejected');
   const lateCancel = cancelled.filter(b => b.isLateCancel).length;
-  const open = list.filter(occupiesQuota);
-  const unsettled = open.filter(b => isOverdueUnsettled(b, now)).length;
   return {
     count1v1,
     count1v2,
     total: count1v1 + count1v2,
-    unsettled,
-    upcoming: open.length - unsettled,
+    unsettled: lifecycles.filter(l => l === 'overdue').length,
+    upcoming: lifecycles.filter(l => l === 'upcoming').length,
+    cancelled: cancelled.length,
     normalCancel: cancelled.length - lateCancel,
     lateCancel,
   };
 };
+
+/** 多列月統計的合計 */
+export const sumTeacherMonthStats = (rows: TeacherMonthStats[]): TeacherMonthStats =>
+  rows.reduce<TeacherMonthStats>(
+    (sum, s) => ({
+      count1v1: sum.count1v1 + s.count1v1,
+      count1v2: sum.count1v2 + s.count1v2,
+      total: sum.total + s.total,
+      unsettled: sum.unsettled + s.unsettled,
+      upcoming: sum.upcoming + s.upcoming,
+      cancelled: sum.cancelled + s.cancelled,
+      normalCancel: sum.normalCancel + s.normalCancel,
+      lateCancel: sum.lateCancel + s.lateCancel,
+    }),
+    { count1v1: 0, count1v2: 0, total: 0, unsettled: 0, upcoming: 0, cancelled: 0, normalCancel: 0, lateCancel: 0 },
+  );
 
 // ------------------------------------------
 // 通知分級 / 操作時間
@@ -975,11 +1026,81 @@ export const getSelfCancelSeverity = (isAdmin: boolean, isLateCancel: boolean): 
 export const formatTimestamp = (d: Date = new Date()): string =>
   `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
-/** 明細列表的簽到時間 MM/DD HH:mm；舊資料沒有簽到時間戳記時改用課堂日期時間 */
-export const formatSignedTime = (
-  b: Pick<BookingItem, 'date' | 'startHour' | 'startMin' | 'signedAt' | 'systemSignedAt'>,
-): string => {
-  const stamp = (b.signedAt || b.systemSignedAt || '').match(/(\d{2})\/(\d{2}) (\d{2}:\d{2})/);
-  if (stamp) return `${stamp[1]}/${stamp[2]} ${stamp[3]}`;
-  return `${b.date.slice(5).replace('-', '/')} ${timeLabel(b.startHour, b.startMin)}`;
+/** 操作時間 YYYY/MM/DD HH:mm → MM/DD HH:mm；缺漏時顯示 — */
+export const formatShortStamp = (stamp?: string): string =>
+  stamp?.match(/\d{2}\/\d{2} \d{2}:\d{2}/)?.[0] ?? (stamp || '—');
+
+/** 課堂日期 YYYY-MM-DD 與開始時間 HH:mm → MM/DD HH:mm */
+export const formatShortDateTime = (date: string, time: string): string =>
+  `${date.slice(5).replace('-', '/')} ${time}`;
+
+// ------------------------------------------
+// 課堂結果與時間欄（全站唯一格式）
+// ------------------------------------------
+
+/** 歷史課堂的結果；尚未簽到且未取消的課堂為 null */
+export type BookingOutcome =
+  | 'signed'
+  | 'makeup_signed'
+  | 'system_signed'
+  | 'cancelled'
+  | 'late_cancelled'
+  | 'system_cancelled'
+  | 'rejected';
+
+export const getBookingOutcome = (
+  b: Pick<
+    BookingItem,
+    'status' | 'signed' | 'isLateSigned' | 'isSystemSigned' | 'settlementType' |
+    'isLateCancel' | 'isSystemCancelled' | 'cancelReason'
+  >,
+): BookingOutcome | null => {
+  if (b.signed) {
+    if (b.isSystemSigned || b.settlementType === 'system_deducted') return 'system_signed';
+    return b.isLateSigned ? 'makeup_signed' : 'signed';
+  }
+  if (b.status !== 'cancelled_normal') return null;
+  if (b.isSystemCancelled) return 'system_cancelled';
+  if (b.cancelReason === 'non_priority_rejected') return 'rejected';
+  return b.isLateCancel ? 'late_cancelled' : 'cancelled';
+};
+
+type TimeFieldSource = Parameters<typeof getBookingOutcome>[0] &
+  Pick<BookingItem, 'signedAt' | 'systemSignedAt' | 'cancelledAt' | 'systemCancelledAt'>;
+
+/** 處理時間欄：簽到 / 補簽 / 代簽 / 取消時間；尚未簽到且未取消的課堂回傳 null */
+export const getProcessedInfo = (b: TimeFieldSource): { label: string; time: string } | null => {
+  switch (getBookingOutcome(b)) {
+    case null:
+      return null;
+    case 'signed':
+      return { label: '簽到時間', time: formatShortStamp(b.signedAt) };
+    case 'makeup_signed':
+      return { label: '補簽時間', time: formatShortStamp(b.signedAt) };
+    case 'system_signed':
+      return { label: '代簽時間', time: formatShortStamp(b.systemSignedAt || b.signedAt) };
+    default:
+      return { label: '取消時間', time: formatShortStamp(b.systemCancelledAt || b.cancelledAt) };
+  }
+};
+
+/** 改期歷程：異動時間｜原定：（[原教室色點] 原MM/DD HH:mm）；色點標記由 NoticeText 渲染 */
+export const formatRescheduleHistory = (info: RescheduledInfo): string => {
+  const room: RoomType = info.originalRoomId === 'large' ? 'large' : 'small';
+  return `異動時間：${formatShortStamp(info.updatedAt)}｜原定：（${roomToken(room)} ${formatShortDateTime(info.originalDate, info.originalStartTime)}）`;
+};
+
+/** 課堂卡片時間欄（依顯示順序）：處理時間 → 系統處理事由 → 改期歷程 */
+export const getBookingTimeLines = (
+  b: TimeFieldSource & Pick<BookingItem, 'overdueReason' | 'rescheduledInfo'>,
+): string[] => {
+  const processed = getProcessedInfo(b);
+  const outcome = getBookingOutcome(b);
+  const lines: string[] = [];
+  if (processed) lines.push(`${processed.label}：${processed.time}`);
+  if (b.overdueReason && (outcome === 'system_signed' || outcome === 'system_cancelled')) {
+    lines.push(`事由備註：${b.overdueReason}`);
+  }
+  if (b.rescheduledInfo) lines.push(formatRescheduleHistory(b.rescheduledInfo));
+  return lines;
 };

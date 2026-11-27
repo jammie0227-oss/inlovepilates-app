@@ -6,7 +6,8 @@ import { TeacherProfile, BookingItem, StudentItem } from '../mockData';
 import type { PriorityGrid } from '../types';
 import { getStudentBookingPreset, DAY_HOURS, isSlotReleased, isActionableBooking, isPendingApproval, REVIEW_TAG } from '../utils/bookingRules';
 import { useCalendarAutoScroll } from '../utils/useCalendarAutoScroll';
-import BookingEditModal, { BookingEditConfirmPayload } from './BookingEditModal';
+import BookingEditModal from './BookingEditModal';
+import { useBookingEditor, type ExecuteReschedule } from '../utils/useBookingEditor';
 import { systemAlert } from '../utils/systemAlert';
 
 export default function Tab1StudioCalendar({
@@ -40,10 +41,7 @@ export default function Tab1StudioCalendar({
   setViewMode?: (mode: 'day' | 'week') => void;
   openGlobalBooking: (preset?: any) => void;
   /** 管理員直接變更其他老師課表（改期 / 改室 / 取消） */
-  onExecuteReschedule?: (
-    bookingId: string, newDate: string, newHour: number, newMin: number, newRoom: 'large' | 'small',
-    isCancel?: boolean, newLessonType?: '1v1' | '1v2', autoSwaps?: any[]
-  ) => string | undefined;
+  onExecuteReschedule: ExecuteReschedule;
 }) {
   const [localView, setLocalView] = useState<'week' | 'day'>('day');
   const view = viewMode || localView;
@@ -64,7 +62,7 @@ export default function Tab1StudioCalendar({
   const isPastDate = currentStr < today;
 
   // 管理員點擊其他老師的預約卡片：直接開啟共用變更彈窗（改期 / 改室 / 取消）
-  const [adminEditingBooking, setAdminEditingBooking] = useState<BookingItem | null>(null);
+  const adminEditor = useBookingEditor(onExecuteReschedule);
   const handleCardClick = (b: BookingItem, isMyStudentCard: boolean) => {
     if (isMyStudentCard) {
       onSelectStudent(b.studentName || '');
@@ -79,14 +77,8 @@ export default function Tab1StudioCalendar({
       showToast('此課堂已簽到或已取消，無法再異動');
       return;
     }
-    setAdminEditingBooking(b);
+    adminEditor.openEdit(b);
   };
-  const handleAdminEditConfirm = (p: BookingEditConfirmPayload) => {
-    const error: string | undefined = onExecuteReschedule?.(p.bookingId, p.date, p.hour, p.min, p.roomType, p.isCancel, p.lessonType, p.autoSwaps);
-    if (!error) setAdminEditingBooking(null);
-    return error;
-  };
-
   // 2. 嚴格過濾：無論管理者 Daisy 還是任課老師，一律只抓取「自己名下」的有效學員
   const myStudents = useMemo(() => {
     return students.filter(s => s.teacherId === currentUserId && s.status === 'active');
@@ -451,15 +443,14 @@ export default function Tab1StudioCalendar({
       {/* 管理員直接變更一般老師課表（共用變更 / 取消彈窗） */}
       {userRole === 'admin' && (
         <BookingEditModal
-          booking={adminEditingBooking}
+          {...adminEditor.modalProps}
           userRole={userRole}
           today={today}
           bookings={bookings}
           priorityGrid={priorityGrid}
           teachers={teachers}
           students={students}
-          onClose={() => setAdminEditingBooking(null)}
-          onConfirm={handleAdminEditConfirm}
+          currentUserId={currentUserId}
         />
       )}
 

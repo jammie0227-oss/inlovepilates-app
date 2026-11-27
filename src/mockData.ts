@@ -7,6 +7,7 @@ import type {
 export * from './types';
 import { checkGlobalConflict, isCancelledSlot } from './utils/conflict';
 import {
+  calculateStudentStats,
   diffDays,
   findOtherPriorityOwner,
   formatTimestamp,
@@ -76,6 +77,13 @@ export const formatLocalDate = (d: Date): string => {
 // ==========================================
 // 3. 自動排課引擎 (Schedule Engine - 完整落實 A~E 規則)
 // ==========================================
+
+/** 隔週時段的非上課週：以起始排課日（缺漏時用 fallbackBase）起算，每 14 天上一次 */
+const isOffWeek = (slot: StudentRule, dateStr: string, fallbackBase: string): boolean => {
+  if (slot.freq !== '隔週' && slot.freq !== 'EOW') return false;
+  const weeks = Math.floor(diffDays(dateStr, slot.startDate || fallbackBase) / 7);
+  return weeks < 0 || weeks % 2 !== 0;
+};
 
 export class ScheduleEngine {
   private bookings: BookingItem[];
@@ -209,13 +217,14 @@ export class ScheduleEngine {
         .map(b => b.id);
     }
 
-    // 已佔用額度：以 occupiesQuota 統一計算（含審核中與逾期未簽），扣除即將被移除者
-    const preservedFutureCount = this.bookings.filter(
-      b => isSameStudent(b) && occupiesQuota(b) && !removedBookingIds.includes(b.id)
-    ).length;
+    // 已佔用額度：以共用堂數計算機統一計算（含審核中與逾期未簽），扣除即將被移除者
+    const preservedFutureCount = calculateStudentStats(
+      this.bookings.filter(b => !removedBookingIds.includes(b.id)),
+      { id: sid, name: sName, credits },
+    ).occupiedCount;
 
     // 計算本次實際能新增預排的堂數上限（總堂數永不溢出）
-    // targetCount 由 getScheduleQuota 提供，已扣除逾期（含今天已開課未簽）與待審，這裡不可再扣一次
+    // targetCount 由 calculateStudentStats 提供，已扣除逾期（含今天已開課未簽）與待審，這裡不可再扣一次
     let remainingToSchedule = targetCount !== undefined
       ? targetCount
       : credits - preservedFutureCount;
@@ -261,16 +270,8 @@ export class ScheduleEngine {
         if (dateStr < effectiveStartDate) continue;
         if (slot.startDate && dateStr < slot.startDate) continue;
 
-        // 3. 隔週（EOW）精準判算：以 slot.startDate 為基準，隔 14 天排一次
-        const isEOW = slot.freq === '隔週' || slot.freq === 'EOW';
-        if (isEOW) {
-          const baseDate = slot.startDate ? parseLocalDate(slot.startDate) : parseLocalDate(effectiveStartDate);
-          const diffDays = Math.round((matchDate.getTime() - baseDate.getTime()) / (1000 * 60 * 60 * 24));
-          const diffWeeks = Math.floor(diffDays / 7);
-          if (diffWeeks < 0 || diffWeeks % 2 !== 0) {
-            continue; // 奇數週自動跳過
-          }
-        }
+        // 3. 隔週（EOW）：非上課週自動跳過
+        if (isOffWeek(slot, dateStr, effectiveStartDate)) continue;
 
         const [hStr, mStr] = slot.time.split(':');
         const h = parseInt(hStr, 10);
@@ -440,14 +441,12 @@ export class ScheduleEngine {
     const limitDate = parseLocalDate(todayStr);
     limitDate.setDate(limitDate.getDate() + 90);
 
-    // 尋找未來（>= 今天）最後一堂佔額度的預排日作為推算起點
-    const futureOccupied = currentBookings
-      .filter(b => matchesStudent({ id: sid, name: sName }, b.studentId, b.studentName) && occupiesQuota(b) && b.date >= todayStr)
-      .sort((a, b) => b.date.localeCompare(a.date));
+    // 推算起點：最後一堂佔額度的預排日與被取消課堂日期兩者較晚者的隔天（不可補回剛取消的時段）
+    const anchorDate = currentBookings
+      .filter(b => matchesStudent({ id: sid, name: sName }, b.studentId, b.studentName) && occupiesQuota(b))
+      .reduce((latest, b) => (b.date > latest ? b.date : latest), cancelledDate);
 
-    const searchStartDate = futureOccupied.length > 0
-      ? parseLocalDate(futureOccupied[0].date)
-      : parseLocalDate(cancelledDate);
+    const searchStartDate = parseLocalDate(anchorDate);
     searchStartDate.setDate(searchStartDate.getDate() + 1);
     // 起點不得早於今天
     const todayDate = parseLocalDate(todayStr);
@@ -469,6 +468,7 @@ export class ScheduleEngine {
       for (const slot of validSlots) {
         if (cursor.getDay() !== dayNameToNum[slot.day]) continue;
         if (slot.startDate && dateStr < slot.startDate) continue;
+        if (isOffWeek(slot, dateStr, cancelledDate)) continue;
         const [h, m] = slot.time.split(':').map(Number);
         const lType = slot.lessonType || '1v1';
         // 小教室嚴禁排入 1v2

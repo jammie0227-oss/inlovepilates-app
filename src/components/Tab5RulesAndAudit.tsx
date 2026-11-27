@@ -438,7 +438,7 @@ export default function Tab5RulesAndAudit({
                         <button
                           onClick={e => { e.stopPropagation(); onUndoSettlement(l.id); }}
                           className="shrink-0 whitespace-nowrap bg-white border border-slate-300 px-2 py-1 rounded-lg text-[11px] font-bold text-slate-600 hover:bg-slate-50 transition shadow-2xs active:scale-95 flex items-center gap-1"
-                          title="Undo 撤銷結算"
+                          title="Undo 撤銷"
                         >
                           <RotateCcw className="w-3.5 h-3.5" /> 撤銷
                         </button>

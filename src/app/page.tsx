@@ -33,9 +33,11 @@ import {
   compareByStart,
   formatLessonRef,
   formatLessonsTitle,
-  isOverdueUnsettled,
-  occupiesQuota,
+  classifyBookingLifecycle,
+  calculateStudentStats,
+  canSettleBooking,
   shouldAutoReschedule,
+  canPostponeOnCancel,
   canRelocateToSmall,
   findOtherPriorityOwner,
   findReplaceableAutoBooking,
@@ -61,7 +63,7 @@ import {
   getSelfCancelSeverity,
 } from '../utils/bookingRules';
 import type { AutoSwapItem, BookingRequestInput } from '../utils/bookingRules';
-import type { SettlementDraft } from '../components/Tab2PersonalSchedule';
+import type { SettlementAction } from '../types';
 import { useToday } from '../utils/useToday';
 import { systemAlert, registerSystemAlert, systemConfirm, registerSystemDialog, type SystemAlertPayload, type SystemDialogRequest } from '../utils/systemAlert';
 
@@ -531,14 +533,16 @@ export default function Home() {
   const tryAutoPostpone = (
     cancelled: BookingItem,
     bookingsAfterCancel: BookingItem[],
-    /** 同一批操作中尚未寫入的學員堂數異動 */
-    creditDeltas: Record<string, number> = {}
+    /** true = 操作者在取消確認彈窗選擇順延；false = 依學員開關自動判定（系統取消） */
+    requested = false
   ): { added?: BookingItem; message?: string } => {
     const stu = students.find(s => matchesStudent(s, cancelled.studentId, cancelled.studentName));
-    // 依學員的「取消時自動順延補排」開關決定；無固定時間沒有時段可依循，不順延
-    if (!stu || !shouldAutoReschedule(stu)) return {};
-    const occupied = bookingsAfterCancel.filter(b => matchesStudent(stu, b.studentId, b.studentName) && occupiesQuota(b)).length;
-    if (occupied >= stu.credits + (creditDeltas[stu.id] || 0)) return {};
+    // 無固定時間沒有時段可依循、封存學員不可再排課，一律不順延
+    if (!stu || !(requested ? canPostponeOnCancel(stu) : shouldAutoReschedule(stu))) return {};
+    const occupied = calculateStudentStats(bookingsAfterCancel, stu).occupiedCount;
+    if (occupied >= stu.credits) {
+      return requested ? { message: '學員剩餘堂數已全數排定，沒有可補排的額度。' } : {};
+    }
 
     const engine = new ScheduleEngine(
       bookingsAfterCancel,
@@ -680,7 +684,9 @@ export default function Home() {
     newRoom: 'large' | 'small',
     isCancel = false,
     newLessonType?: '1v1' | '1v2',
-    autoSwaps: AutoSwapItem[] = []
+    autoSwaps: AutoSwapItem[] = [],
+    /** 取消時是否順延補排 1 堂（取消確認彈窗的選擇） */
+    postpone = false
   ): string | undefined => {
     // 回傳錯誤訊息代表未寫入，由變更彈窗直接顯示
     const target = bookings.find(b => b.id === bookingId);
@@ -712,7 +718,7 @@ export default function Home() {
     };
 
     // ================= 取消 =================
-    // 一律直接生效：不扣學員堂數、釋出空位、自動順延補排；24 小時內僅標註「超時取消」
+    // 一律直接生效：不扣學員堂數、釋出空位、依操作者選擇順延補排；24 小時內僅標註「超時取消」
     if (isCancel) {
       const isLateCancel = isWithin24Hours(target.date, target.startHour, target.startMin);
       const cancelPatch: Partial<BookingItem> = {
@@ -732,9 +738,11 @@ export default function Home() {
         )]);
       }
 
-      // 取消生效後檢查額度，有空位才自動順延補排一堂（起點不早於今天）
+      // 選擇順延時，取消生效後檢查額度，有空位才補排一堂（起點不早於今天）
       const doneText = isLateCancel ? `已取消課堂（${LATE_CANCEL_LABEL}）` : '已取消課堂';
-      const postponed = tryAutoPostpone(target, bookingsAfterCancel);
+      const postponed: ReturnType<typeof tryAutoPostpone> = postpone
+        ? tryAutoPostpone(target, bookingsAfterCancel, true)
+        : {};
       if (postponed.added) {
         const added = postponed.added;
         const addedTime = `${formatDateWithDay(added.date)} ${formatTimeStr(added.startHour, added.startMin)}`;
@@ -745,7 +753,9 @@ export default function Home() {
         showToast(`${doneText}，並已為學員自動順延補排一堂課（${addedTime}）`);
       } else {
         showToast(doneText);
-        if (postponed.message) systemAlert(postponed.message);
+        if (postpone) {
+          systemAlert(`課堂已取消，但未順延補排。\n${postponed.message || '找不到可補排的固定時段。'}`);
+        }
       }
       return;
     }
@@ -811,6 +821,15 @@ export default function Home() {
       startMin: newMin,
       roomType: newRoom,
       lessonType: finalLessonType,
+      // 僅日期或時間變動才記錄改期歷程；僅改教室 / 類別沿用原紀錄
+      ...(timeUnchanged ? {} : {
+        rescheduledInfo: {
+          updatedAt: formatTimestamp(),
+          originalDate: target.date,
+          originalStartTime: formatTimeStr(target.startHour, target.startMin),
+          originalRoomId: target.roomType,
+        },
+      }),
     };
     // 課表立即移至新時段（原時段釋出，新時段佔用）並同步移動被讓位的課堂
     setBookings(prev => prev.map(b => {
@@ -833,106 +852,107 @@ export default function Home() {
     showToast(`${userRole === 'admin' ? '管理員已變更預約' : `${changeType}完成！`}${afterWriteNotice}`);
   };
 
-  // --- 老師手動執行：逾期課堂批量結算（系統代簽 / 系統取消） ---
-  const handleProcessSettlement = (drafts: Record<string, SettlementDraft>) => {
-    const settleTs = formatTimestamp();
-
-    // 僅處理仍為「逾期未處理」的課堂，避免重複結算
-    const targets = bookings.filter(b => drafts[b.id] && isOverdueUnsettled(b)).sort(compareByStart);
+  // --- 逾期課堂系統代簽（單堂或全部）/ 全部系統取消 ---
+  const handleSettle = (bookingIds: string[], action: SettlementAction) => {
+    const isSign = action === 'system_sign';
+    const actionName = isSign ? '系統代簽' : '系統取消';
+    // 僅處理仍為「逾期未處理」且有權處理的課堂，避免重複扣堂
+    const targets = bookings.filter(b =>
+      bookingIds.includes(b.id) && classifyBookingLifecycle(b) === 'overdue' && canSettleBooking(b, userRole, currentUserId),
+    ).sort(compareByStart);
     if (targets.length === 0) {
-      showToast('沒有可結算的逾期課堂');
+      showToast(`沒有可${actionName}的逾期課堂（已簽到、取消或無權限）`);
       return;
     }
 
+    const settledAt = formatTimestamp();
+    const patch: Partial<BookingItem> = isSign
+      ? {
+          status: 'confirmed',
+          signed: true,
+          signedAt: settledAt,
+          isSystemSigned: true,
+          systemSignedAt: settledAt,
+          settlementType: 'system_deducted',
+        }
+      : {
+          status: 'cancelled_normal',
+          isSystemCancelled: true,
+          systemCancelledAt: settledAt,
+          cancelledAt: settledAt,
+          // 已開課後才取消，統計上屬超時取消
+          isLateCancel: true,
+        };
+
     const creditDeltas: Record<string, number> = {};
-    const patches: Record<string, Partial<BookingItem>> = {};
     const entries = targets.map(b => {
-      const { action, reason: rawReason } = drafts[b.id];
-      const reason = rawReason.trim();
-      const reasonLine = reason ? `\n事由：${reason}` : '';
       const stu = students.find(st => matchesStudent(st, b.studentId, b.studentName));
-      const isSign = action === 'system_sign';
       const creditsDeducted = isSign && stu ? 1 : 0;
       if (stu && creditsDeducted) creditDeltas[stu.id] = (creditDeltas[stu.id] || 0) - creditsDeducted;
       const remain = stu ? stu.credits + (creditDeltas[stu.id] || 0) : 0;
 
-      patches[b.id] = isSign
-        ? {
-            status: 'confirmed',
-            signed: true,
-            signedAt: settleTs,
-            isSystemSigned: true,
-            systemSignedAt: settleTs,
-            settlementType: 'system_deducted',
-            overdueReason: reason || undefined,
-          }
-        : {
-            status: 'cancelled_normal',
-            isSystemCancelled: true,
-            systemCancelledAt: settleTs,
-            cancelledAt: settleTs,
-            // 已開課後才取消，統計上屬超時取消
-            isLateCancel: true,
-            overdueReason: reason || undefined,
-          };
-
+      // 管理員代其他老師處理：操作者記為管理員，系統取消比照代為取消的分級
+      const isAdminOverride = userRole === 'admin' && b.teacherId !== currentUserId;
       const log = buildLessonLog(
         [b],
-        (isSign
-          ? `因逾期結算執行【系統代簽】，扣除 ${creditsDeducted} 堂，學員剩餘 ${remain} 堂`
-          : '因逾期結算執行【系統取消】，不扣堂數') + reasonLine,
-        isSign ? '系統代簽' : '系統取消',
-        isSign ? 'yellow' : getSelfCancelSeverity(b.teacherId === ADMIN_ID, true),
-        { remainingCredits: isSign && stu ? remain : undefined }
+        (isAdminOverride ? `管理員 Daisy 協助 ${cleanName(b.teacherId)} 老師處理逾期課堂\n` : '') +
+          (isSign
+            ? `逾期未處理課堂執行【系統代簽】，扣除 ${creditsDeducted} 堂，學員剩餘 ${remain} 堂`
+            : '逾期未處理課堂執行【系統取消】，不扣堂數'),
+        actionName,
+        isSign
+          ? 'yellow'
+          : isAdminOverride ? getAdminOverrideSeverity('取消') : getSelfCancelSeverity(b.teacherId === ADMIN_ID, true),
+        { remainingCredits: isSign && stu ? remain : undefined, actor: isAdminOverride ? 'Daisy' : undefined }
       );
       log.settlement = {
-        action, bookingId: b.id, studentId: stu?.id, settledAt: settleTs,
+        action, bookingId: b.id, studentId: stu?.id, settledAt,
         snapshot: { ...b }, creditsDeducted,
       };
       return { booking: b, log };
     });
 
-    let next = bookings.map(b => patches[b.id] ? { ...b, ...patches[b.id] } : b);
+    const targetIds = new Set(targets.map(b => b.id));
+    const apply = (b: BookingItem): BookingItem => targetIds.has(b.id) ? { ...b, ...patch } : b;
+
+    // 系統取消：依學員開關逐堂順延補排
+    let next = bookings.map(apply);
     const added: BookingItem[] = [];
     const postponeLogs: AuditLogItem[] = [];
-    entries.forEach(({ booking, log }) => {
-      if (!log.settlement || log.settlement.action !== 'system_cancel') return;
-      const result = tryAutoPostpone(booking, next, creditDeltas);
-      if (!result.added) return;
-      added.push(result.added);
-      next = [...next, result.added];
-      const postponeLog = buildPostponeLog(booking, result.added);
-      postponeLogs.push(postponeLog);
-      log.settlement = { ...log.settlement, postponedBookingId: result.added.id, postponeLogId: postponeLog.id };
-    });
+    if (!isSign) {
+      entries.forEach(({ booking, log }) => {
+        const result = tryAutoPostpone(booking, next);
+        if (!result.added || !log.settlement) return;
+        added.push(result.added);
+        next = [...next, result.added];
+        const postponeLog = buildPostponeLog(booking, result.added);
+        postponeLogs.push(postponeLog);
+        log.settlement = { ...log.settlement, postponedBookingId: result.added.id, postponeLogId: postponeLog.id };
+      });
+    }
 
     setStudents(prev => prev.map(st =>
       creditDeltas[st.id] ? { ...st, credits: st.credits + creditDeltas[st.id] } : st
     ));
-    setBookings(prev => [
-      ...prev.map(b => patches[b.id] ? { ...b, ...patches[b.id] } : b),
-      ...added,
-    ]);
+    setBookings(prev => [...prev.map(apply), ...added]);
     pushLogs([...postponeLogs, ...entries.map(e => e.log)]);
     settlePreBookingReviews(targets.map(b => b.id), next);
     submitPendingBookings(added, '取消後自動順延');
     notifyPriorityOwners(added);
 
-    const signedCount = entries.filter(e => e.log.settlement?.action === 'system_sign').length;
-    const cancelledCount = entries.length - signedCount;
-    systemAlert(
-      `【逾期課堂結算處理完成】\n系統代簽 ${signedCount} 堂（扣堂）\n系統取消 ${cancelledCount} 堂（不扣堂），自動順延補排 ${added.length} 堂`
-    );
+    showToast(isSign
+      ? `已系統代簽 ${targets.length} 堂，共扣除 ${entries.filter(e => e.log.settlement?.creditsDeducted).length} 堂`
+      : `已系統取消 ${targets.length} 堂（不扣堂），自動順延補排 ${added.length} 堂`);
   };
 
-  // --- 管理員撤銷逾期結算：還原為逾期未處理、回補堂數、移除自動補排 ---
+  // --- 管理員撤銷系統代簽 / 系統取消：還原為逾期未處理、回補堂數、移除自動補排 ---
   const handleUndoSettlement = (logId: string) => {
     if (userRole !== 'admin') return;
     const log = logs.find(l => l.id === logId);
     const record = log?.settlement;
     if (!log || !record) return;
     if (log.revokedAt) {
-      showToast('此結算已撤銷');
+      showToast('此操作已撤銷');
       return;
     }
 
@@ -941,7 +961,7 @@ export default function Home() {
       ? current.signed && current.systemSignedAt === record.settledAt
       : current.status === 'cancelled_normal' && current.systemCancelledAt === record.settledAt);
     if (!current || !stillSettled) {
-      showToast('此課堂在結算後已有後續變動，無法撤銷');
+      showToast('此課堂在系統處理後已有後續變動，無法撤銷');
       return;
     }
     const postponed = bookings.find(b => b.id === record.postponedBookingId);
@@ -981,7 +1001,7 @@ export default function Home() {
       l.id === logId || (!!record.postponeLogId && l.id === record.postponeLogId) ? { ...l, revokedAt } : l));
 
     showToast(
-      `已撤銷結算，課堂回到逾期未處理` +
+      `已撤銷${record.action === 'system_sign' ? '系統代簽' : '系統取消'}，課堂回到逾期未處理` +
       (record.creditsDeducted > 0 ? `，回補 ${record.creditsDeducted} 堂` : '') +
       (postponed ? '，並移除自動補排課堂' : '')
     );
@@ -992,9 +1012,7 @@ export default function Home() {
     const stu = students.find(s => s.id === studentId);
     if (!stu || (userRole !== 'admin' && stu.teacherId !== currentUserId)) return;
     const now = new Date();
-    const targets = bookings
-      .filter(b => matchesStudent(stu, b.studentId, b.studentName) && occupiesQuota(b) && !isOverdueUnsettled(b, now))
-      .sort(compareByStart);
+    const targets = calculateStudentStats(bookings, stu, now).upcoming;
     if (targets.length === 0) {
       showToast('目前沒有尚未開課的預排');
       return;
@@ -1048,7 +1066,7 @@ export default function Home() {
     const reasonText = rev.reason ? `\n事由：${rev.reason}` : '';
     const decisionPatch: Partial<BookingItem> = isApproved
       ? { status: 'confirmed' }
-      : { status: 'cancelled_normal', cancelReason: 'non_priority_rejected' };
+      : { status: 'cancelled_normal', cancelReason: 'non_priority_rejected', cancelledAt: formatTimestamp() };
     const resultText = isApproved ? '核准生效' : '駁回不成立（時段已釋出）';
     // 核准前重跑衝堂檢查（排程引擎、撤銷審核等例外路徑的保險）
     const findConflict = (t: BookingItem) => checkGlobalConflict({
@@ -1502,7 +1520,7 @@ export default function Home() {
                 teachers={teachers} 
                 bookings={bookings}
                 isActive={activeTab === 2 && !selectedStudentId && !selectedTeacherId}
-                onProcessSettlement={handleProcessSettlement}
+                onSettle={handleSettle}
                 priorityGrid={priorityGrid}
                 onExecuteReschedule={handleExecuteReschedule}
                 students={students} 
@@ -1538,6 +1556,7 @@ export default function Home() {
                   }}
                   onAddBookings={handleAddBookings}
                   onExecuteReschedule={handleExecuteReschedule}
+                  onSettle={handleSettle}
                   openGlobalBooking={openGlobalBooking}
                   onClearUpcoming={handleClearUpcoming}
                   students={students}

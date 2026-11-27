@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { PenTool, X, RotateCcw, Check } from 'lucide-react';
-import { formatLessonRange, formatSignedTime, getSignatureWindowStatus, isFutureLesson, REVIEW_TAG } from '../utils/bookingRules';
+import { classifyBookingLifecycle, formatLessonRange, getBookingOutcome, getProcessedInfo, getSignatureWindowStatus, isPendingApproval, REVIEW_TAG } from '../utils/bookingRules';
 import { RoomDot } from './RoomDot';
 import { systemAlert } from '../utils/systemAlert';
 
@@ -151,59 +151,55 @@ interface BookingStatusBadgeProps {
   onZoomSignature?: (data: { url: string; time: string }) => void;
   /** 有效但尚未簽到的課堂顯示「尚未開始 / 待簽到」（明細列表用） */
   showLessonState?: boolean;
-  /** 已簽到課堂在標籤旁顯示簽到時間（明細列表用） */
-  showSignedTime?: boolean;
+  /** 不在標籤旁附簽到 / 取消時間（卡片另有處理時間欄時使用） */
+  hideProcessedTime?: boolean;
 }
 
-export function BookingStatusBadge({ booking: b, onZoomSignature, showLessonState, showSignedTime }: BookingStatusBadgeProps) {
+export function BookingStatusBadge({ booking: b, onZoomSignature, showLessonState, hideProcessedTime }: BookingStatusBadgeProps) {
   if (!b) return null;
-    return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-      {/* 1. 系統代簽 / 系統代結 (最優先判定) */}
-      {(b.settlementType === 'system_deducted' || b.isSystemSigned) ? (
-        <span 
-          className="text-[10px] bg-amber-100 text-amber-900 border border-amber-300 font-black px-2 py-0.5 rounded-full shadow-2xs flex items-center gap-0.5"
-          title={b.overdueReason ? `系統代簽原因：${b.overdueReason}` : '逾期結算：系統代簽扣堂'}
-        >
-          ⚡ 系統代簽
-        </span>
-      ) : b.isLateSigned ? (
-        /* 2. 逾期補簽 (金黃色標籤) */
-        <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 font-black px-1.5 py-0.5 rounded shadow-2xs">
-          補簽
-        </span>
-      ) : b.signed ? (
-        /* 3. 正常親簽 (綠色標籤) */
-        <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300 font-black px-1.5 py-0.5 rounded shadow-2xs">
-          已簽到
-        </span>
-      ) : b.status === 'cancelled_normal' ? (
-        /* 4. 取消類（超時取消附帶取消當下時間） */
-        b.isSystemCancelled ? (
-          <>
-            <span className="text-[10px] bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full font-black shadow-2xs" title="逾期結算：系統取消（不扣堂數）">系統取消</span>
-            {b.systemCancelledAt && <span className="text-[10px] text-slate-400 font-mono">{b.systemCancelledAt}</span>}
-          </>
-        ) : b.cancelReason === 'non_priority_rejected' ? (
-          <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非優先駁回</span>
-        ) : b.isLateCancel ? (
-          <>
-            <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold shadow-2xs" title="超時取消（24H 內）">超時取消</span>
-            {b.cancelledAt && <span className="text-[10px] text-slate-400 font-mono">{b.cancelledAt}</span>}
-          </>
-        ) : (
-          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold shadow-2xs">正常取消</span>
-        )
-      ) : b.status === 'special_pending' ? (
-        <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG}</span>
-      ) : !showLessonState ? null : isFutureLesson(b.date, b.startHour, b.startMin) ? (
-        <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full shadow-2xs">尚未開始</span>
-      ) : (
-        <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-bold shadow-2xs">待簽到</span>
-      )}
+  const outcome = getBookingOutcome(b);
+  const processed = hideProcessedTime ? null : getProcessedInfo(b);
+  // 明細列表附時間的結果：簽到類、超時取消、系統取消
+  const showTime = !!processed && outcome !== 'cancelled' && outcome !== 'rejected';
 
-      {showSignedTime && b.signed && (
-        <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">（{formatSignedTime(b)}）</span>
+  const renderTag = () => {
+    switch (outcome) {
+      case 'system_signed':
+        return (
+          <span
+            className="text-[10px] bg-amber-100 text-amber-900 border border-amber-300 font-black px-2 py-0.5 rounded-full shadow-2xs flex items-center gap-0.5"
+            title={b.overdueReason ? `系統代簽原因：${b.overdueReason}` : '逾期未處理：系統代簽扣堂'}
+          >
+            ⚡ 系統代簽
+          </span>
+        );
+      case 'makeup_signed':
+        return <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 font-black px-1.5 py-0.5 rounded shadow-2xs">補簽</span>;
+      case 'signed':
+        return <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300 font-black px-1.5 py-0.5 rounded shadow-2xs">已簽到</span>;
+      case 'system_cancelled':
+        return <span className="text-[10px] bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full font-black shadow-2xs" title="逾期結算：系統取消（不扣堂數）">系統取消</span>;
+      case 'rejected':
+        return <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold shadow-2xs">非優先駁回</span>;
+      case 'late_cancelled':
+        return <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold shadow-2xs" title="超時取消（24H 內）">超時取消</span>;
+      case 'cancelled':
+        return <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold shadow-2xs">已取消</span>;
+    }
+    if (isPendingApproval(b)) {
+      return <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold shadow-2xs">{REVIEW_TAG}</span>;
+    }
+    if (!showLessonState) return null;
+    return classifyBookingLifecycle(b) === 'upcoming'
+      ? <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full shadow-2xs">尚未開始</span>
+      : <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-bold shadow-2xs">待簽到</span>;
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      {renderTag()}
+      {showTime && (
+        <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">（{processed.time}）</span>
       )}
 
       {/* 簽名筆跡縮圖 (僅在有手寫筆跡且傳入縮放 callback 時呈現) */}
