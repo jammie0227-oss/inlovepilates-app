@@ -74,10 +74,15 @@ export default function BookingRecordCard({
             <span className="font-black text-slate-900 text-sm">{b.studentName}</span>
           )}
           <span className="text-slate-400 font-bold text-[11px]">({b.lessonType})</span>
-          {isHistory && <BookingStatusBadge booking={b} onZoomSignature={onZoomSignature} hideProcessedTime />}
           {b.rescheduledInfo && <span className={`${tagCls} bg-sky-100 text-sky-800 border-sky-300`}>改期</span>}
           {!isHistory && isPending && <span className={`${tagCls} bg-amber-100 text-amber-800 border-amber-300`}>{REVIEW_TAG}</span>}
         </div>
+        {/* 靠右：歷史卡片為最終狀態標籤＋簽名縮圖；其餘為操作鈕（簽名 / 補簽固定最右） */}
+        {isHistory && (
+          <div className="shrink-0 ml-auto">
+            <BookingStatusBadge booking={b} onZoomSignature={onZoomSignature} hideProcessedTime />
+          </div>
+        )}
         {!isHistory && (
           <div className="flex items-center gap-1.5 shrink-0 ml-auto" onClick={e => e.stopPropagation()}>
             {onSystemSign && (
