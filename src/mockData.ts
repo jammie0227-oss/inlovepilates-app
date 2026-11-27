@@ -829,6 +829,108 @@ export const INITIAL_PRIORITY_GRID: PriorityGrid = {
   ...prioritySlots('t-2', ['一', '二', '三', '四', '五'], 18, 21),    // Tanya：週一至週五 18:00–21:00
 };
 
+// ==========================================
+// 營運功能測試資料 (2026/11/28 ～ 12/06)
+// ==========================================
+/** 學員姓名與課程類別一律由 INITIAL_STUDENTS 帶出，避免與學員資料不一致 */
+const testBooking = (
+  id: string,
+  date: string,
+  startHour: number,
+  teacherId: string,
+  studentId: string,
+  roomType: BookingItem['roomType'],
+  extra: Partial<BookingItem> = {},
+): BookingItem => {
+  const student = INITIAL_STUDENTS.find(s => s.id === studentId)!;
+  return {
+    id,
+    date,
+    startHour,
+    startMin: 0,
+    durationMins: 50,
+    teacherId,
+    studentName: student.name,
+    studentId,
+    roomType,
+    lessonType: student.defaultLessonType ?? '1v1',
+    status: 'confirmed',
+    signed: false,
+    ...extra,
+  };
+};
+
+const TEST_WEEK_BOOKINGS: BookingItem[] = [
+  // 11/28（六）— 另有 b-nov-09 (11:00)、b-nov-10 (19:00)
+  testBooking('b-test-1128-1', '2026-11-28', 9, 't-1', 's-1', 'small'),
+  testBooking('b-test-1128-2', '2026-11-28', 13, 't-daisy', 's-d-2', 'large'),
+  // 改期歷程範例：原定 11/29 13:00 大教室
+  testBooking('b-test-1128-3', '2026-11-28', 15, 't-4', 's-ta-1', 'small', {
+    rescheduledInfo: {
+      updatedAt: '2026/11/27 09:30',
+      originalDate: '2026-11-29',
+      originalStartTime: '13:00',
+      originalRoomId: 'large',
+    },
+  }),
+  testBooking('b-test-1128-4', '2026-11-28', 16, 't-daisy', 's-d-3', 'large'),
+
+  // 11/29（日）
+  testBooking('b-test-1129-1', '2026-11-29', 10, 't-2', 's-5', 'small'),
+  testBooking('b-test-1129-2', '2026-11-29', 11, 't-4', 's-ta-2', 'large'),
+  // 大教室讓位測試：14:00 大教室 1v1、小教室空檔
+  testBooking('b-test-1129-3', '2026-11-29', 14, 't-2', 's-t-2', 'large'),
+  testBooking('b-test-1129-4', '2026-11-29', 16, 't-daisy', 's-d-1', 'small'),
+
+  // 11/30（一）— 另有 b-nov-11 (14:00)、b-nov-12 (19:00)
+  testBooking('b-test-1130-1', '2026-11-30', 10, 't-daisy', 's-d-3', 'large'),
+  testBooking('b-test-1130-2', '2026-11-30', 16, 't-4', 's-ta-2', 'large'),
+
+  // 12/01（二）
+  testBooking('b-test-1201-1', '2026-12-01', 10, 't-daisy', 's-d-1', 'small'),
+  testBooking('b-test-1201-2', '2026-12-01', 11, 't-1', 's-2', 'large'),
+  testBooking('b-test-1201-3', '2026-12-01', 15, 't-4', 's-ta-1', 'small'),
+  testBooking('b-test-1201-4', '2026-12-01', 19, 't-2', 's-5', 'small'),
+
+  // 12/02（三）
+  testBooking('b-test-1202-1', '2026-12-02', 11, 't-2', 's-t-2', 'large'),
+  testBooking('b-test-1202-2', '2026-12-02', 13, 't-4', 's-ta-2', 'large'),
+  // 大教室讓位測試：15:00 大教室 1v1、小教室空檔
+  testBooking('b-test-1202-3', '2026-12-02', 15, 't-daisy', 's-d-3', 'large'),
+  testBooking('b-test-1202-4', '2026-12-02', 17, 't-1', 's-a-3', 'small'),
+
+  // 12/03（四）
+  testBooking('b-test-1203-1', '2026-12-03', 10, 't-1', 's-2', 'large'),
+  testBooking('b-test-1203-2', '2026-12-03', 15, 't-1', 's-a-3', 'small'),
+  testBooking('b-test-1203-3', '2026-12-03', 16, 't-daisy', 's-d-2', 'large'),
+  testBooking('b-test-1203-4', '2026-12-03', 20, 't-2', 's-5', 'small'),
+
+  // 12/04（五）
+  testBooking('b-test-1204-1', '2026-12-04', 10, 't-4', 's-ta-1', 'small'),
+  testBooking('b-test-1204-2', '2026-12-04', 14, 't-4', 's-ta-2', 'large'),
+  testBooking('b-test-1204-3', '2026-12-04', 16, 't-daisy', 's-d-1', 'small'),
+  testBooking('b-test-1204-4', '2026-12-04', 19, 't-2', 's-t-2', 'large'),
+
+  // 12/05（六）
+  testBooking('b-test-1205-1', '2026-12-05', 9, 't-daisy', 's-d-3', 'small'),
+  testBooking('b-test-1205-2', '2026-12-05', 10, 't-1', 's-2', 'large'),
+  testBooking('b-test-1205-3', '2026-12-05', 14, 't-2', 's-5', 'small'),
+  testBooking('b-test-1205-4', '2026-12-05', 15, 't-4', 's-ta-1', 'large'),
+
+  // 12/06（日）
+  testBooking('b-test-1206-1', '2026-12-06', 10, 't-2', 's-5', 'small'),
+  testBooking('b-test-1206-2', '2026-12-06', 11, 't-daisy', 's-d-2', 'large'),
+  testBooking('b-test-1206-3', '2026-12-06', 14, 't-1', 's-a-3', 'small'),
+  testBooking('b-test-1206-4', '2026-12-06', 16, 't-4', 's-ta-2', 'large'),
+
+  // 非優先審核待審單（對應 INITIAL_REVIEWS）
+  // 日期須距今 14 天以上，否則載入時會被系統自動核准
+  // Tata 預約 Abby 優先時段（週二 10:00）
+  testBooking('b-test-pending-1', '2026-12-22', 10, 't-4', 's-ta-1', 'small', { status: 'special_pending' }),
+  // Abby 預約 Tanya 優先時段（週三 19:00）
+  testBooking('b-test-pending-2', '2026-12-23', 19, 't-1', 's-2', 'large', { status: 'special_pending' }),
+];
+
 export const INITIAL_BOOKINGS: BookingItem[] = [
   // ==========================================
   // 1. 逾期未簽到測試區 (10/26 ~ 10/29)
@@ -1353,7 +1455,8 @@ export const INITIAL_BOOKINGS: BookingItem[] = [
     lessonType: '1v2',
     status: 'confirmed',
     signed: false
-  }
+  },
+  ...TEST_WEEK_BOOKINGS
 ];
 
 export const INITIAL_REVIEWS: ReviewItem[] = [
@@ -1370,6 +1473,34 @@ export const INITIAL_REVIEWS: ReviewItem[] = [
     time: '12/11(五) 11:00',
     room: '大教室',
     lessonType: '1v1',
+    reason: '非優先時段預約申請',
+    status: 'pending',
+    reviewType: 'non_priority'
+  },
+  {
+    id: 'rev-np-b-test-pending-1',
+    bookingId: 'b-test-pending-1',
+    teacherId: 't-4',
+    teacherName: 'Tata',
+    studentName: '蔡依珊',
+    date: '2026-12-22',
+    time: '12/22(二) 10:00',
+    room: '小教室',
+    lessonType: '1v1',
+    reason: '非優先時段預約申請',
+    status: 'pending',
+    reviewType: 'non_priority'
+  },
+  {
+    id: 'rev-np-b-test-pending-2',
+    bookingId: 'b-test-pending-2',
+    teacherId: 't-1',
+    teacherName: 'Abby',
+    studentName: '李小花',
+    date: '2026-12-23',
+    time: '12/23(三) 19:00',
+    room: '大教室',
+    lessonType: '1v2',
     reason: '非優先時段預約申請',
     status: 'pending',
     reviewType: 'non_priority'
